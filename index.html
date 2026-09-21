@@ -1680,6 +1680,8 @@ function handleCreateClick(x,y){
       return;
     }
     const newNode = newTreeNode(x,y,color);
+    newNode.verdict = 'correct'; // por defecto se asume que aquí termina bien; se puede cambiar o quitar
+    if(cursor.verdict==='correct') cursor.verdict = null; // ya no es el final de la línea, ahora sigue
     cursor.children.push(newNode);
     st.path.push(newNode);
   }
@@ -2264,7 +2266,7 @@ function editCard(card){
     path: [treeCopy],
     marks: JSON.parse(JSON.stringify(card.marks||[])),
     markShape: 'triangle', setupColor: (State.prefs && State.prefs.setupColor) || 'alt',
-    note: card.note || '', mode:'setup',
+    note: card.note || '', mode: isDraftCard(card) ? 'tree' : 'setup',
   };
 }
 
