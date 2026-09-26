@@ -1086,10 +1086,10 @@ const State = {
   create: null,
   reviewQueue: [],
   reviewQueueTotal: 0,
-  reviewFolder: 'all',
   listFolder: 'all',
-  listSort: 'due',
+  listSort: 'alpha',
   listDraftsOnly: false,
+  listSearch: '',
   reviewIdx: 0,
   reviewStep: null,
   prefs: null,
@@ -1170,9 +1170,9 @@ async function updateDueBadge(){
 async function buildReviewQueue(){
   State.cards = await storeListCards();
   const t = todayISO();
-  const folder = State.reviewFolder || 'all';
+  const studyFolders = State.prefs && State.prefs.studyFolders;
   let due = State.cards.filter(c=>treeHasVerdict(c.tree,'correct') && c.srs.due<=t);
-  if(folder!=='all') due = due.filter(c=>(c.folder||'')===folder);
+  if(studyFolders) due = due.filter(c=>studyFolders.includes(c.folder||''));
   due.sort((a,b)=>a.srs.due.localeCompare(b.srs.due));
   const limit = (State.prefs && State.prefs.dailyLimit) || 0;
   State.reviewQueueTotal = due.length;
@@ -1308,46 +1308,7 @@ function renderCreate(root){
   h.textContent = st.id ? 'Editar tarjeta' : 'Crear tarjeta';
   root.appendChild(h);
 
-  const p = document.createElement('p'); p.className='hint';
-  p.textContent = 'Coloca la posición inicial, luego graba el árbol de jugadas: toca el tablero para añadir una jugada, o para seguir una rama que ya existe. Marca cada final como correcto o incorrecto.';
-  root.appendChild(p);
-
-  // tamaño de tablero
-  const sizeField = document.createElement('div'); sizeField.className='field';
-  sizeField.innerHTML = '<label>Tamaño del tablero</label>';
-  const sizeToggle = document.createElement('div'); sizeToggle.className='toggle-group';
-  [9,13,19].forEach(sz=>{
-    const b = document.createElement('button');
-    b.textContent = sz+'×'+sz;
-    if(st.boardSize===sz) b.classList.add('active');
-    b.addEventListener('click', ()=>{
-      if(st.setup.length || st.tree.children.length){
-        if(!confirm('Cambiar el tamaño borrará la posición actual. ¿Continuar?')) return;
-      }
-      st.boardSize = sz; st.setup=[]; st.tree=newTreeRoot(); st.path=[st.tree];
-      saveCreateDefaults(st);
-      render();
-    });
-    sizeToggle.appendChild(b);
-  });
-  sizeField.appendChild(sizeToggle);
-  root.appendChild(sizeField);
-
-  // quién juega primero (siempre es, además, el color con el que se practica al repasar)
-  const fmField = document.createElement('div'); fmField.className='field';
-  fmField.innerHTML = '<label>Primera jugada</label>';
-  const fmToggle = document.createElement('div'); fmToggle.className='toggle-group';
-  ['B','W'].forEach(c=>{
-    const b=document.createElement('button');
-    b.textContent = c==='B' ? 'Negro' : 'Blanco';
-    if(st.firstMover===c) b.classList.add('active');
-    b.addEventListener('click', ()=>{ st.firstMover=c; saveCreateDefaults(st); render(); });
-    fmToggle.appendChild(b);
-  });
-  fmField.appendChild(fmToggle);
-  root.appendChild(fmField);
-
-  // modo de edición
+  // modo de edición — arriba de todo, es lo primero que se usa
   const modeRow = document.createElement('div'); modeRow.className='btnrow';
   [['setup','Posición inicial'],['tree','Árbol de jugadas'],['marks','Marcas']].forEach(([key,label])=>{
     const b = document.createElement('button');
@@ -1392,14 +1353,12 @@ function renderCreate(root){
 
   const cursor = st.path[st.path.length-1];
 
-  // status line
+  // status line (breve)
   const status = document.createElement('div'); status.className='status-line';
   let statusText = '';
-  if(st.mode==='setup') statusText = `Toca una casilla vacía para colocar ${st.setupColor==='alt' ? 'la siguiente piedra (alternando)' : (st.setupColor==='B'?'una piedra negra':'una piedra blanca')}; toca una piedra para quitarla.`;
-  else if(st.mode==='tree') statusText = `Nivel ${st.path.length-1} · siguiente: ${nextColorLabel(st.firstMover, st.path.length-1)}${cursor.children.length ? ` · ${cursor.children.length} rama(s) desde aquí` : ''}`;
-  else if(st.mode==='marks') statusText = st.markShape==='number'
-    ? 'Toca piedras en orden para numerarlas (útil para mostrar una secuencia previa); toca una numerada para quitarla.'
-    : `Toca un punto para marcarlo con ${st.markShape==='triangle'?'un triángulo':'un cuadrado'}; toca de nuevo para cambiar la forma o quitarla.`;
+  if(st.mode==='setup') statusText = st.setupColor==='alt' ? 'Alternando negro/blanco.' : (st.setupColor==='B'?'Colocando negras.':'Colocando blancas.');
+  else if(st.mode==='tree') statusText = `Nivel ${st.path.length-1}${cursor.children.length ? ` · ${cursor.children.length} rama(s) aquí` : ''}`;
+  else if(st.mode==='marks') statusText = st.markShape==='number' ? 'Numerando piedras.' : `Marcando con ${st.markShape==='triangle'?'triángulo':'cuadrado'}.`;
   status.innerHTML = `<span>${statusText}</span>`;
   root.appendChild(status);
 
@@ -1432,6 +1391,7 @@ function renderCreate(root){
   const {stones, numbers} = currentCreateStones(st);
   renderBoard(boardWrap, st.boardSize, stones, (x,y)=>handleCreateClick(x,y), null, st.marks, numbers);
 
+  // acciones inmediatas, justo debajo del tablero
   if(st.mode==='setup' || st.mode==='marks'){
     const editRow = document.createElement('div'); editRow.className='btnrow';
     const undoBtn = document.createElement('button'); undoBtn.className='btn ghost small'; undoBtn.textContent='Deshacer último punto';
@@ -1440,7 +1400,10 @@ function renderCreate(root){
     root.appendChild(editRow);
   }
 
+  let counts = {correct:0, wrong:0, unmarked:0};
   if(st.mode==='tree'){
+    counts = countLeavesByVerdict(st.tree);
+
     // ramas disponibles desde el punto actual
     if(cursor.children.length>1){
       const branchField = document.createElement('div'); branchField.className='field';
@@ -1473,12 +1436,8 @@ function renderCreate(root){
       };
       verdictRow.appendChild(mkVerdictBtn('correct','✓ Correcta','var(--pine)'));
       verdictRow.appendChild(mkVerdictBtn('wrong','✗ Incorrecta','var(--shu)'));
-      verdictField.appendChild(verdictRow);
-      root.appendChild(verdictField);
-
-      const deleteRow = document.createElement('div'); deleteRow.className='btnrow';
       const delBtn = document.createElement('button'); delBtn.className='btn ghost small';
-      delBtn.textContent = cursor.children.length ? 'Eliminar esta rama (y lo que sigue)' : 'Eliminar esta jugada';
+      delBtn.textContent = cursor.children.length ? 'Eliminar rama' : 'Eliminar';
       delBtn.addEventListener('click', ()=>{
         if(cursor.children.length && !confirm('Esta rama tiene jugadas después. ¿Eliminar todo?')) return;
         const parent = st.path[st.path.length-2];
@@ -1486,54 +1445,13 @@ function renderCreate(root){
         st.path.pop();
         render();
       });
-      deleteRow.appendChild(delBtn);
-      root.appendChild(deleteRow);
-    }
-
-    // vista completa del árbol
-    const outlineBox = document.createElement('div'); outlineBox.className='lines-box';
-    if(st.tree.children.length===0){
-      outlineBox.innerHTML = '<span style="color:var(--ink-soft); font-size:13px;">Aún no hay jugadas grabadas — toca el tablero para empezar.</span>';
-    } else {
-      appendTreeOutline(outlineBox, st.tree, [st.tree], st.boardSize, st.path);
-    }
-    root.appendChild(outlineBox);
-
-    const counts = countLeavesByVerdict(st.tree);
-    if(counts.correct>1 || counts.unmarked>0){
-      const varHint = document.createElement('p'); varHint.className='hint';
-      let hintText = '';
-      if(counts.correct>1) hintText += 'Con varias variantes correctas, al repasar el rival elige al azar entre las que sigan siendo válidas, y se acepta cualquier variante que juegues tú. ';
-      if(counts.unmarked>0) hintText += `Hay ${counts.unmarked} rama(s) sin marcar como correcta o incorrecta.`;
-      varHint.textContent = hintText;
-      root.appendChild(varHint);
+      verdictRow.appendChild(delBtn);
+      verdictField.appendChild(verdictRow);
+      root.appendChild(verdictField);
     }
   }
 
-  // nota
-  const noteField = document.createElement('div'); noteField.className='field';
-  noteField.innerHTML = '<label>Nota (opcional)</label>';
-  const noteInput = document.createElement('input'); noteInput.type='text'; noteInput.value=st.note;
-  noteInput.placeholder='p. ej. Joseki 3-3, variante del contacto por fuera';
-  noteInput.addEventListener('input', e=>{ st.note = e.target.value; });
-  noteField.appendChild(noteInput);
-  root.appendChild(noteField);
-
-  // carpeta
-  const folderField = document.createElement('div'); folderField.className='field';
-  folderField.innerHTML = '<label>Carpeta (opcional)</label>';
-  const folderInput = document.createElement('input'); folderInput.type='text'; folderInput.value=st.folder||'';
-  folderInput.placeholder='p. ej. Joseki, Vida y muerte, Fuseki 9×9…';
-  folderInput.setAttribute('list','folder-suggestions');
-  folderInput.addEventListener('input', e=>{ st.folder = e.target.value; });
-  folderField.appendChild(folderInput);
-  const datalist = document.createElement('datalist'); datalist.id='folder-suggestions';
-  const existingFolders = Array.from(new Set(State.cards.map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
-  existingFolders.forEach(f=>{ const opt=document.createElement('option'); opt.value=f; datalist.appendChild(opt); });
-  folderField.appendChild(datalist);
-  root.appendChild(folderField);
-
-  // guardar
+  // guardar — justo debajo de las acciones del tablero, antes de nota/carpeta
   const hasCorrect = treeHasVerdict(st.tree, 'correct');
   const hasAnything = hasCorrect || st.setup.length>0 || st.tree.children.length>0;
   const saveRow = document.createElement('div'); saveRow.className='btnrow';
@@ -1551,14 +1469,82 @@ function renderCreate(root){
   root.appendChild(saveRow);
   if(!hasCorrect && hasAnything){
     const draftHint = document.createElement('p'); draftHint.className='hint'; draftHint.style.margin='-6px 0 10px';
-    draftHint.textContent = 'Puedes guardarla como borrador sin línea correcta todavía y añadir las ramas más adelante; no aparecerá en el repaso hasta que tenga al menos una.';
+    draftHint.textContent = 'Se guarda como borrador — no aparece en el repaso hasta tener una línea correcta.';
     root.appendChild(draftHint);
   }
 
-  // SGF import/export
-  const details = document.createElement('details'); details.className='sgf-io';
-  const summary = document.createElement('summary'); summary.textContent = 'Editor de archivo SGF';
-  details.appendChild(summary);
+  // nota + carpeta (después de guardar, son secundarios)
+  const noteField = document.createElement('div'); noteField.className='field';
+  noteField.innerHTML = '<label>Nota (opcional)</label>';
+  const noteInput = document.createElement('input'); noteInput.type='text'; noteInput.value=st.note;
+  noteInput.placeholder='p. ej. Joseki 3-3, contacto por fuera';
+  noteInput.addEventListener('input', e=>{ st.note = e.target.value; });
+  noteField.appendChild(noteInput);
+  root.appendChild(noteField);
+
+  const folderField = document.createElement('div'); folderField.className='field';
+  folderField.innerHTML = '<label>Carpeta (opcional)</label>';
+  const folderInput = document.createElement('input'); folderInput.type='text'; folderInput.value=st.folder||'';
+  folderInput.placeholder='p. ej. Joseki, Vida y muerte';
+  folderInput.setAttribute('list','folder-suggestions');
+  folderInput.addEventListener('input', e=>{ st.folder = e.target.value; });
+  folderField.appendChild(folderInput);
+  const datalist = document.createElement('datalist'); datalist.id='folder-suggestions';
+  const existingFolders = Array.from(new Set(State.cards.map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
+  existingFolders.forEach(f=>{ const opt=document.createElement('option'); opt.value=f; datalist.appendChild(opt); });
+  folderField.appendChild(datalist);
+  root.appendChild(folderField);
+
+  // menú único con el resto de las opciones: árbol completo, ajustes de tablero, SGF
+  const moreDetails = document.createElement('details'); moreDetails.className='sgf-io';
+  const moreSummary = document.createElement('summary'); moreSummary.textContent = 'Más opciones';
+  moreDetails.appendChild(moreSummary);
+
+  if(st.mode==='tree'){
+    const treeSub = document.createElement('div'); treeSub.style.cssText='font-size:12.5px; color:var(--ink-soft); margin:10px 0 4px;';
+    treeSub.textContent = `Árbol completo (${counts.correct} correcta${counts.correct===1?'':'s'}, ${counts.wrong} incorrecta${counts.wrong===1?'':'s'}${counts.unmarked?`, ${counts.unmarked} sin marcar`:''})`;
+    moreDetails.appendChild(treeSub);
+    const outlineBox = document.createElement('div'); outlineBox.className='lines-box';
+    if(st.tree.children.length===0){
+      outlineBox.innerHTML = '<span style="color:var(--ink-soft); font-size:13px;">Aún no hay jugadas grabadas.</span>';
+    } else {
+      appendTreeOutline(outlineBox, st.tree, [st.tree], st.boardSize, st.path);
+    }
+    moreDetails.appendChild(outlineBox);
+  }
+
+  const sizeField = document.createElement('div'); sizeField.className='field'; sizeField.style.marginTop='10px';
+  sizeField.innerHTML = '<label>Tamaño del tablero</label>';
+  const sizeToggle = document.createElement('div'); sizeToggle.className='toggle-group';
+  [9,13,19].forEach(sz=>{
+    const b = document.createElement('button');
+    b.textContent = sz+'×'+sz;
+    if(st.boardSize===sz) b.classList.add('active');
+    b.addEventListener('click', ()=>{
+      if(st.setup.length || st.tree.children.length){
+        if(!confirm('Cambiar el tamaño borrará la posición actual. ¿Continuar?')) return;
+      }
+      st.boardSize = sz; st.setup=[]; st.tree=newTreeRoot(); st.path=[st.tree];
+      saveCreateDefaults(st);
+      render();
+    });
+    sizeToggle.appendChild(b);
+  });
+  sizeField.appendChild(sizeToggle);
+  moreDetails.appendChild(sizeField);
+
+  const fmField = document.createElement('div'); fmField.className='field';
+  fmField.innerHTML = '<label>Primera jugada</label>';
+  const fmToggle = document.createElement('div'); fmToggle.className='toggle-group';
+  ['B','W'].forEach(c=>{
+    const b=document.createElement('button');
+    b.textContent = c==='B' ? 'Negro' : 'Blanco';
+    if(st.firstMover===c) b.classList.add('active');
+    b.addEventListener('click', ()=>{ st.firstMover=c; saveCreateDefaults(st); render(); });
+    fmToggle.appendChild(b);
+  });
+  fmField.appendChild(fmToggle);
+  moreDetails.appendChild(fmField);
 
   const importField = document.createElement('div'); importField.className='field';
   importField.innerHTML = '<label>Pegar SGF para importar</label>';
@@ -1574,7 +1560,7 @@ function renderCreate(root){
     }catch(e){ alert('No se pudo leer el SGF: '+e.message); }
   });
   importField.appendChild(importBtn);
-  details.appendChild(importField);
+  moreDetails.appendChild(importField);
 
   const exportField = document.createElement('div'); exportField.className='field';
   exportField.innerHTML = '<label>Exportar tarjeta actual como .sgf</label>';
@@ -1585,9 +1571,9 @@ function renderCreate(root){
     downloadText((st.note||'tarjeta').replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', sgfText);
   });
   exportField.appendChild(exportBtn);
-  details.appendChild(exportField);
+  moreDetails.appendChild(exportField);
 
-  root.appendChild(details);
+  root.appendChild(moreDetails);
 
   if(st.importPicker) renderImportPicker(root, st);
 }
@@ -1831,15 +1817,25 @@ function renderReview(root){
   }
 
   const folderNames = Array.from(new Set((State.cards||[]).map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
+  const hasNoFolderCards = (State.cards||[]).some(c=>!c.folder);
   if(folderNames.length){
     const filterField = document.createElement('div'); filterField.className='field';
-    filterField.innerHTML = '<label>Carpeta</label>';
+    filterField.innerHTML = '<label>Repasar</label>';
     const sel = document.createElement('select');
-    const optAll = document.createElement('option'); optAll.value='all'; optAll.textContent='Todas las carpetas';
+    const optAll = document.createElement('option'); optAll.value='__all__'; optAll.textContent='Todas las carpetas';
     sel.appendChild(optAll);
     folderNames.forEach(f=>{ const o=document.createElement('option'); o.value=f; o.textContent=f; sel.appendChild(o); });
-    sel.value = State.reviewFolder;
-    sel.addEventListener('change', async ()=>{ State.reviewFolder = sel.value; await buildReviewQueue(); render(); });
+    if(hasNoFolderCards){ const o=document.createElement('option'); o.value='__none__'; o.textContent='Sin carpeta'; sel.appendChild(o); }
+    const current = State.prefs && State.prefs.studyFolders;
+    sel.value = (current && current.length===1) ? (current[0]===''?'__none__':current[0]) : '__all__';
+    sel.addEventListener('change', async ()=>{
+      const v = sel.value;
+      const studyFolders = v==='__all__' ? null : [v==='__none__' ? '' : v];
+      State.prefs = Object.assign({}, State.prefs, {studyFolders});
+      await storeSet('prefs', State.prefs);
+      await buildReviewQueue();
+      render();
+    });
     filterField.appendChild(sel);
     root.appendChild(filterField);
   }
@@ -1858,17 +1854,6 @@ function renderReview(root){
   const limitNote = State.reviewQueueTotal>State.reviewQueue.length ? ` (límite diario · quedan ${State.reviewQueueTotal-State.reviewQueue.length} para otro día)` : '';
   p.innerHTML = `Tarjeta ${State.reviewIdx+1} de ${State.reviewQueue.length}${limitNote}${card.note ? ' · '+card.note : ''} · juegas con <strong>${uColor==='B'?'Negro ⚫':'Blanco ⚪'}</strong>`;
   root.appendChild(p);
-
-  const editRow = document.createElement('div'); editRow.className='btnrow'; editRow.style.margin='0 0 10px';
-  const editCardBtn = document.createElement('button'); editCardBtn.className='btn ghost small';
-  editCardBtn.textContent = '✎ Editar esta tarjeta';
-  editCardBtn.addEventListener('click', ()=>{
-    State.returnToReview = true;
-    editCard(card);
-    switchView('create');
-  });
-  editRow.appendChild(editCardBtn);
-  root.appendChild(editRow);
 
   const step = State.reviewStep;
   const turnColor = nextMoveColor(card, step.moveCount);
@@ -1904,9 +1889,9 @@ function renderReview(root){
   const interactive = isUserTurn || step.status==='exploring';
   renderBoard(boardWrap, card.boardSize, step.placed, interactive ? (x,y)=>handleReviewPoint(x,y) : null, step.markers, card.marks, step.numbers);
 
-  // confirmar jugada
+  // confirmar jugada + editar tarjeta, juntos debajo del tablero
+  const confirmRow = document.createElement('div'); confirmRow.className='btnrow';
   if(isUserTurn){
-    const confirmRow = document.createElement('div'); confirmRow.className='btnrow';
     const confirmBtn = document.createElement('button'); confirmBtn.className='btn pine small';
     confirmBtn.textContent = 'Confirmar jugada';
     confirmBtn.disabled = !step.pending;
@@ -1917,8 +1902,16 @@ function renderReview(root){
       cancelBtn.addEventListener('click', ()=>{ step.pending=null; step.markers.clear(); render(); });
       confirmRow.appendChild(cancelBtn);
     }
-    root.appendChild(confirmRow);
   }
+  const editCardBtn = document.createElement('button'); editCardBtn.className='btn ghost small';
+  editCardBtn.textContent = '✎ Editar esta tarjeta';
+  editCardBtn.addEventListener('click', ()=>{
+    State.returnToReview = true;
+    editCard(card);
+    switchView('create');
+  });
+  confirmRow.appendChild(editCardBtn);
+  root.appendChild(confirmRow);
 
   // exploración libre
   if(step.status==='exploring'){
@@ -2128,6 +2121,21 @@ function renderList(root){
 
   const draftCount = State.cards.filter(isDraftCard).length;
 
+  const searchField = document.createElement('div'); searchField.className='field';
+  const searchInput = document.createElement('input'); searchInput.type='text';
+  searchInput.id = 'list-search-input';
+  searchInput.placeholder='Buscar por nota…';
+  searchInput.value = State.listSearch || '';
+  searchInput.addEventListener('input', e=>{
+    const cursorPos = e.target.selectionStart;
+    State.listSearch = e.target.value;
+    render();
+    const el = document.getElementById('list-search-input');
+    if(el){ el.focus(); el.setSelectionRange(cursorPos, cursorPos); }
+  });
+  searchField.appendChild(searchInput);
+  root.appendChild(searchField);
+
   const filterRow = document.createElement('div'); filterRow.className='row';
 
   const folderNames = Array.from(new Set(State.cards.map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
@@ -2176,16 +2184,19 @@ function renderList(root){
     root.appendChild(draftToggleRow);
   }
 
+  const searchQuery = (State.listSearch||'').trim().toLowerCase();
   const filtered = State.cards.filter(c=>{
     if(State.listDraftsOnly && !isDraftCard(c)) return false;
-    if(State.listFolder==='all') return true;
-    if(State.listFolder==='__none__') return !c.folder;
-    return c.folder===State.listFolder;
+    if(State.listFolder==='all'){ /* sin filtro de carpeta */ }
+    else if(State.listFolder==='__none__'){ if(c.folder) return false; }
+    else if(c.folder!==State.listFolder) return false;
+    if(searchQuery && !(c.note||'').toLowerCase().includes(searchQuery)) return false;
+    return true;
   });
 
   if(filtered.length===0){
     const empty = document.createElement('div'); empty.className='empty';
-    empty.innerHTML = `<div class="big">Nada que mostrar</div><div>${State.listDraftsOnly ? 'No hay borradores con este filtro.' : 'Ninguna tarjeta coincide con este filtro.'}</div>`;
+    empty.innerHTML = `<div class="big">Nada que mostrar</div><div>${searchQuery ? 'Ninguna nota coincide con la búsqueda.' : (State.listDraftsOnly ? 'No hay borradores con este filtro.' : 'Ninguna tarjeta coincide con este filtro.')}</div>`;
     root.appendChild(empty);
     return;
   }
@@ -2298,9 +2309,40 @@ function renderSettings(root){
   });
   limitField.appendChild(limitInput);
   const limitHint = document.createElement('p'); limitHint.className='hint';
-  limitHint.textContent = 'Cuando hay más tarjetas pendientes que el límite, solo se te presentan las más antiguas ese día; el resto sigue esperando su turno.';
+  limitHint.textContent = 'Si hay más pendientes que el límite, se muestran primero las más antiguas.';
   limitField.appendChild(limitHint);
   root.appendChild(limitField);
+
+  const allFolderNames = Array.from(new Set((State.cards||[]).map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
+  if(allFolderNames.length){
+    const studyField = document.createElement('div'); studyField.className='field';
+    studyField.innerHTML = '<label>Carpetas a estudiar</label>';
+    const hasNoFolderCards = (State.cards||[]).some(c=>!c.folder);
+    const options = allFolderNames.slice();
+    if(hasNoFolderCards) options.push('');
+    const currentSet = State.prefs && State.prefs.studyFolders ? new Set(State.prefs.studyFolders) : null; // null = todas
+
+    options.forEach(f=>{
+      const row = document.createElement('label');
+      row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:5px 0; font-size:13.5px;';
+      const chk = document.createElement('input'); chk.type='checkbox';
+      chk.checked = currentSet ? currentSet.has(f) : true;
+      chk.addEventListener('change', async ()=>{
+        const present = new Set(currentSet ? currentSet : options);
+        if(chk.checked) present.add(f); else present.delete(f);
+        const allChecked = options.every(o=>present.has(o));
+        State.prefs = Object.assign({}, State.prefs, {studyFolders: allChecked ? null : Array.from(present)});
+        await storeSet('prefs', State.prefs);
+        await buildReviewQueue();
+        render();
+      });
+      row.appendChild(chk);
+      const label = document.createElement('span'); label.textContent = f || 'Sin carpeta';
+      row.appendChild(label);
+      studyField.appendChild(row);
+    });
+    root.appendChild(studyField);
+  }
 
   const t = todayISO();
   const cards = State.cards||[];
@@ -2323,7 +2365,7 @@ function renderSettings(root){
   const backupTitle = document.createElement('h2'); backupTitle.className='section-title'; backupTitle.textContent='Importar / exportar';
   root.appendChild(backupTitle);
   const backupHint = document.createElement('p'); backupHint.className='hint';
-  backupHint.textContent = 'Exporta todas tus tarjetas como un .zip de archivos .sgf (uno por tarjeta), o importa un .zip (o un .sgf suelto) para crear tarjetas en lote. Cada archivo se importa con la primera rama como variante correcta y la segunda, si existe, como línea incorrecta.';
+  backupHint.textContent = 'Exporta tus tarjetas como .zip de .sgf, o importa un .zip o .sgf para crear varias tarjetas a la vez.';
   root.appendChild(backupHint);
 
   const backupRow = document.createElement('div'); backupRow.className='btnrow';
@@ -2359,7 +2401,7 @@ function renderSettings(root){
   const textTitle = document.createElement('h2'); textTitle.className='section-title'; textTitle.textContent='Copiar y pegar (sin archivos)';
   root.appendChild(textTitle);
   const textHint = document.createElement('p'); textHint.className='hint';
-  textHint.textContent = 'Para pasar tus tarjetas a otro navegador cuando no puedes descargar o elegir archivos: copia este texto aquí, y pégalo en el cuadro de abajo en el otro navegador. Incluye todo (fechas de repaso, variantes, marcas).';
+  textHint.textContent = 'Copia este texto y pégalo en el otro navegador para pasar tus tarjetas ahí.';
   root.appendChild(textHint);
 
   const copyField = document.createElement('div'); copyField.className='field';
