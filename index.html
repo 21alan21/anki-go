@@ -589,27 +589,56 @@ function el(tag, attrs){
  * onPoint(x,y) - click handler, or null if not interactive
  * markers: Map "x,y" -> {type:'last'|'ok'|'bad'}
  */
-function renderBoard(container, size, stones, onPoint, markers, marks, numbers){
+function renderBoard(container, size, stones, onPoint, markers, marks, numbers, crop, showCoords){
   container.innerHTML = "";
-  const pad = size>=19 ? 14 : (size>=13 ? 18 : 26);
-  const cell = (100 - 2*pad) / (size - 1);
-  const svg = el("svg", {class:"board", viewBox:"0 0 100 100"});
-
-  // grid
-  for(let i=0;i<size;i++){
-    const p = pad + i*cell;
-    svg.appendChild(el("line",{x1:pad,y1:p,x2:100-pad,y2:p,stroke:"var(--wood-line)","stroke-width":0.25}));
-    svg.appendChild(el("line",{x1:p,y1:pad,x2:p,y2:100-pad,stroke:"var(--wood-line)","stroke-width":0.25}));
+  let offsetX=0, offsetY=0, cols=size, rows=size, pad, cell, viewW, viewH;
+  if(crop){
+    offsetX = crop.minX; offsetY = crop.minY;
+    cols = crop.maxX-crop.minX+1; rows = crop.maxY-crop.minY+1;
+    pad = 10; cell = 13;
+  } else {
+    pad = size>=19 ? 14 : (size>=13 ? 18 : 26);
+    cell = (100 - 2*pad) / (size - 1);
   }
-  // star points
+  const labelPad = showCoords ? pad*0.55 : 0;
+  viewW = pad*2 + (cols-1)*cell + labelPad;
+  viewH = pad*2 + (rows-1)*cell + labelPad;
+  const sx = x => labelPad + pad + (x-offsetX)*cell;
+  const sy = y => pad + (y-offsetY)*cell;
+
+  const svg = el("svg", {class:"board", viewBox:`0 0 ${viewW} ${viewH}`});
+
+  // grid (solo el rango visible)
+  for(let i=offsetY; i<offsetY+rows; i++){
+    svg.appendChild(el("line",{x1:sx(offsetX),y1:sy(i),x2:sx(offsetX+cols-1),y2:sy(i),stroke:"var(--wood-line)","stroke-width":0.25}));
+  }
+  for(let i=offsetX; i<offsetX+cols; i++){
+    svg.appendChild(el("line",{x1:sx(i),y1:sy(offsetY),x2:sx(i),y2:sy(offsetY+rows-1),stroke:"var(--wood-line)","stroke-width":0.25}));
+  }
+  // star points (solo si caen dentro del rango visible)
   starPoints(size).forEach(([x,y])=>{
-    svg.appendChild(el("circle",{cx:pad+x*cell, cy:pad+y*cell, r:0.7, fill:"var(--wood-line)"}));
+    if(x<offsetX || x>=offsetX+cols || y<offsetY || y>=offsetY+rows) return;
+    svg.appendChild(el("circle",{cx:sx(x), cy:sy(y), r: crop ? cell*0.1 : 0.7, fill:"var(--wood-line)"}));
   });
+
+  // coordenadas
+  if(showCoords){
+    for(let x=offsetX; x<offsetX+cols; x++){
+      const t = el("text",{x:sx(x), y:sy(offsetY+rows-1)+labelPad*0.75, "text-anchor":"middle","font-size":labelPad*0.55, fill:"var(--ink-soft)","font-family":"Georgia, serif"});
+      t.textContent = COLS[x];
+      svg.appendChild(t);
+    }
+    for(let y=offsetY; y<offsetY+rows; y++){
+      const t = el("text",{x:sx(offsetX)-labelPad*0.6, y:sy(y), "text-anchor":"middle","dominant-baseline":"central","font-size":labelPad*0.55, fill:"var(--ink-soft)","font-family":"Georgia, serif"});
+      t.textContent = size-y;
+      svg.appendChild(t);
+    }
+  }
 
   // stones
   stones.forEach((color, key)=>{
     const [x,y] = key.split(',').map(Number);
-    const cx = pad+x*cell, cy = pad+y*cell;
+    const cx = sx(x), cy = sy(y);
     const r = cell*0.46;
     const isB = color === 'B';
     svg.appendChild(el("circle",{
@@ -633,7 +662,7 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers){
   if(markers){
     markers.forEach((m,key)=>{
       const [x,y]=key.split(',').map(Number);
-      const cx=pad+x*cell, cy=pad+y*cell;
+      const cx=sx(x), cy=sy(y);
       const stoneAtPt = stones.get(key);
       const dotColor = m.type==='bad' ? "var(--shu)" : (m.type==='ok' ? "var(--pine)" : "var(--ink)");
       const strokeColor = stoneAtPt==='B' ? "#fff" : dotColor;
@@ -644,7 +673,8 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers){
   // triangle / square / numeral annotation marks
   if(marks){
     marks.forEach(m=>{
-      const cx = pad+m.x*cell, cy = pad+m.y*cell;
+      if(crop && (m.x<offsetX || m.x>=offsetX+cols || m.y<offsetY || m.y>=offsetY+rows)) return;
+      const cx = sx(m.x), cy = sy(m.y);
       const stoneAtPt = stones.get(m.x+','+m.y);
       const color = stoneAtPt==='B' ? "var(--stone-white-1)" : (stoneAtPt==='W' ? "var(--stone-black-1)" : "var(--shu)");
       const r = cell*0.28;
@@ -668,11 +698,11 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers){
     });
   }
 
-  // click targets
+  // click targets (solo el rango visible)
   if(onPoint){
-    for(let x=0;x<size;x++){
-      for(let y=0;y<size;y++){
-        const cx = pad+x*cell, cy = pad+y*cell;
+    for(let x=offsetX; x<offsetX+cols; x++){
+      for(let y=offsetY; y<offsetY+rows; y++){
+        const cx = sx(x), cy = sy(y);
         const hit = el("circle",{cx,cy,r:cell*0.48, fill:"transparent"});
         hit.style.cursor = "pointer";
         hit.addEventListener('click', ()=>onPoint(x,y));
@@ -683,6 +713,43 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers){
 
   container.appendChild(svg);
 }
+/** Recoge todos los puntos (x,y) usados en el árbol, para calcular el recorte relevante. */
+function collectAllTreePoints(node, pts){
+  pts = pts || [];
+  if(node.x!==null) pts.push({x:node.x,y:node.y});
+  node.children.forEach(c=>collectAllTreePoints(c,pts));
+  return pts;
+}
+/** Calcula el rectángulo relevante del tablero (posición inicial + todo el árbol + marcas), con margen. */
+function computeCropBounds(size, setup, tree, marks){
+  const pts = [];
+  (setup||[]).forEach(p=>pts.push({x:p.x,y:p.y}));
+  if(tree) collectAllTreePoints(tree, pts);
+  (marks||[]).forEach(m=>pts.push({x:m.x,y:m.y}));
+  if(pts.length===0) return null;
+  let minX=Math.min(...pts.map(p=>p.x)), maxX=Math.max(...pts.map(p=>p.x));
+  let minY=Math.min(...pts.map(p=>p.y)), maxY=Math.max(...pts.map(p=>p.y));
+  const margin = 2;
+  minX = Math.max(0, minX-margin); maxX = Math.min(size-1, maxX+margin);
+  minY = Math.max(0, minY-margin); maxY = Math.min(size-1, maxY+margin);
+  const minSpan = 6;
+  if(maxX-minX < minSpan){
+    const center = (minX+maxX)/2;
+    minX = Math.max(0, Math.round(center-minSpan/2));
+    maxX = Math.min(size-1, minX+minSpan);
+    minX = Math.max(0, maxX-minSpan);
+  }
+  if(maxY-minY < minSpan){
+    const center = (minY+maxY)/2;
+    minY = Math.max(0, Math.round(center-minSpan/2));
+    maxY = Math.min(size-1, minY+minSpan);
+    minY = Math.max(0, maxY-minSpan);
+  }
+  // si el recorte casi no ahorra espacio frente al tablero completo, no vale la pena recortar
+  if(maxX-minX >= size-2 && maxY-minY >= size-2) return null;
+  return {minX,maxX,minY,maxY};
+}
+
 
 /* ---------------------------------------------------------------
    Parser SGF (soporta ramas / variaciones)
@@ -1098,7 +1165,7 @@ const State = {
   returnToReview: false,
 };
 
-const DEFAULT_PREFS = {boardSize:9, setupColor:'alt', firstMover:'B', dailyLimit:20, lastFolder:''};
+const DEFAULT_PREFS = {boardSize:9, setupColor:'alt', firstMover:'B', dailyLimit:20, lastFolder:'', autoCrop:true, showCoords:false};
 
 function freshCreate(){
   const d = State.prefs || DEFAULT_PREFS;
@@ -1389,7 +1456,10 @@ function renderCreate(root){
   root.appendChild(boardWrap);
 
   const {stones, numbers} = currentCreateStones(st);
-  renderBoard(boardWrap, st.boardSize, stones, (x,y)=>handleCreateClick(x,y), null, st.marks, numbers);
+  const cropOn = !State.prefs || State.prefs.autoCrop!==false;
+  const crop = cropOn ? computeCropBounds(st.boardSize, st.setup, st.tree, st.marks) : null;
+  const showCoords = !!(State.prefs && State.prefs.showCoords);
+  renderBoard(boardWrap, st.boardSize, stones, (x,y)=>handleCreateClick(x,y), null, st.marks, numbers, crop, showCoords);
 
   // acciones inmediatas, justo debajo del tablero
   if(st.mode==='setup' || st.mode==='marks'){
@@ -1887,7 +1957,10 @@ function renderReview(root){
   const boardWrap = document.createElement('div'); boardWrap.className='board-wrap';
   root.appendChild(boardWrap);
   const interactive = isUserTurn || step.status==='exploring';
-  renderBoard(boardWrap, card.boardSize, step.placed, interactive ? (x,y)=>handleReviewPoint(x,y) : null, step.markers, card.marks, step.numbers);
+  const cropOn = !State.prefs || State.prefs.autoCrop!==false;
+  const crop = cropOn ? computeCropBounds(card.boardSize, card.setup, card.tree, card.marks) : null;
+  const showCoords = !!(State.prefs && State.prefs.showCoords);
+  renderBoard(boardWrap, card.boardSize, step.placed, interactive ? (x,y)=>handleReviewPoint(x,y) : null, step.markers, card.marks, step.numbers, crop, showCoords);
 
   // confirmar jugada + editar tarjeta, juntos debajo del tablero
   const confirmRow = document.createElement('div'); confirmRow.className='btnrow';
@@ -2312,6 +2385,34 @@ function renderSettings(root){
   limitHint.textContent = 'Si hay más pendientes que el límite, se muestran primero las más antiguas.';
   limitField.appendChild(limitHint);
   root.appendChild(limitField);
+
+  const displayTitle = document.createElement('h2'); displayTitle.className='section-title'; displayTitle.style.fontSize='16px'; displayTitle.textContent='Tablero';
+  root.appendChild(displayTitle);
+
+  const mkCheckboxRow = (checked, label, onChange)=>{
+    const row = document.createElement('label');
+    row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:5px 0; font-size:13.5px;';
+    const chk = document.createElement('input'); chk.type='checkbox'; chk.checked = checked;
+    chk.addEventListener('change', onChange);
+    row.appendChild(chk);
+    const span = document.createElement('span'); span.textContent = label;
+    row.appendChild(span);
+    return row;
+  };
+
+  const cropRow = mkCheckboxRow(!State.prefs || State.prefs.autoCrop!==false, 'Recortar automáticamente al área relevante del problema', async (e)=>{
+    State.prefs = Object.assign({}, State.prefs, {autoCrop: e.target.checked});
+    await storeSet('prefs', State.prefs);
+    render();
+  });
+  root.appendChild(cropRow);
+
+  const coordsRow = mkCheckboxRow(!!(State.prefs && State.prefs.showCoords), 'Mostrar coordenadas', async (e)=>{
+    State.prefs = Object.assign({}, State.prefs, {showCoords: e.target.checked});
+    await storeSet('prefs', State.prefs);
+    render();
+  });
+  root.appendChild(coordsRow);
 
   const allFolderNames = Array.from(new Set((State.cards||[]).map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
   if(allFolderNames.length){
