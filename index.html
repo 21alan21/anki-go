@@ -343,6 +343,8 @@ function normalizeCard(card){
     }
     delete card.correctLines; delete card.wrongLines; delete card.correctLine;
   }
+  if(card.title===undefined){ card.title = card.note || ''; card.note = ''; } // antes la nota hacía de título
+  if(!card.note) card.note = '';
   if(!card.folder) card.folder = '';
   if(!card.createdAt) card.createdAt = 0; // tarjetas antiguas sin marca de tiempo
   return card;
@@ -371,13 +373,19 @@ async function storeListCards(){
   }
 }
 
-function todayISO(){
-  const d = new Date();
-  return d.toISOString().slice(0,10);
+function localISO(d){
+  const p = n=>String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate());
 }
+function todayISO(){ return localISO(new Date()); }
 function fmtDate(iso){
   const d = new Date(iso+'T00:00:00');
   return d.toLocaleDateString('es-ES', {day:'numeric', month:'short', year:'numeric'});
+}
+function esc(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function autoTitleFor(n){
+  const t = (State.prefs && State.prefs.titleTemplate) || 'Problema {}';
+  return t.includes('{}') ? t.replace('{}', n) : t+' '+n;
 }
 function uid(){ return 'c'+Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
@@ -738,17 +746,9 @@ function computeCropBounds(size, setup, tree, marks){
   const rawMinX=Math.min(...pts.map(p=>p.x)), rawMaxX=Math.max(...pts.map(p=>p.x));
   const rawMinY=Math.min(...pts.map(p=>p.y)), rawMaxY=Math.max(...pts.map(p=>p.y));
   const margin = 3;
-  // margen deseado a cada lado; si un lado choca con la pared real del tablero,
-  // el margen que se pierde ahí se traslada al lado opuesto (que sí tiene espacio).
-  function withCompensation(rawMin, rawMax){
-    let lo = rawMin - margin, hi = rawMax + margin;
-    if(lo < 0){ hi += (0 - lo); lo = 0; }
-    if(hi > size-1){ lo -= (hi - (size-1)); hi = size-1; }
-    lo = Math.max(0, lo); hi = Math.min(size-1, hi);
-    return [lo, hi];
-  }
-  let [minX, maxX] = withCompensation(rawMinX, rawMaxX);
-  let [minY, maxY] = withCompensation(rawMinY, rawMaxY);
+  const clamp = (lo,hi)=>[Math.max(0,lo), Math.min(size-1,hi)];
+  let [minX, maxX] = clamp(rawMinX-margin, rawMaxX+margin);
+  let [minY, maxY] = clamp(rawMinY-margin, rawMaxY+margin);
   const minSpan = 6;
   if(maxX-minX < minSpan){
     const center = (minX+maxX)/2;
@@ -860,11 +860,15 @@ function importSGF(text){
     if(p && /^\d+$/.test(text||'')) marks.push({x:p.x,y:p.y,type:'number', value:parseInt(text,10)});
   });
   const paths = collectPaths(tree);
-  return {size: [9,13,19].includes(size)?size:19, setup, marks, paths, comment: (root.C && root.C[0]) || ''};
+  let name = (root.GN && root.GN[0]) || '';
+  let comment = (root.C && root.C[0]) || '';
+  if(!name && comment){ name = comment; comment = ''; } // SGF antiguos: el comentario hacía de título
+  return {size: [9,13,19].includes(size)?size:19, setup, marks, paths, name, comment};
 }
 function exportSGF(card){
   const size = card.boardSize;
   let s = `(;GM[1]FF[4]CA[UTF-8]SZ[${size}]`;
+  if(card.title) s += `GN[${card.title.replace(/\]/g,'\\]')}]`;
   if(card.note) s += `C[${card.note.replace(/\]/g,'\\]')}]`;
   const ab = card.setup.filter(p=>p.color==='B').map(p=>`[${String.fromCharCode(97+p.x)}${String.fromCharCode(97+p.y)}]`).join('');
   const aw = card.setup.filter(p=>p.color==='W').map(p=>`[${String.fromCharCode(97+p.x)}${String.fromCharCode(97+p.y)}]`).join('');
@@ -1158,7 +1162,7 @@ function schedule(srs, rating){
   }
   const due = new Date();
   due.setDate(due.getDate() + interval);
-  return {ease, interval, reps, due: due.toISOString().slice(0,10), lastReview: todayISO()};
+  return {ease, interval, reps, due: localISO(due), lastReview: todayISO()};
 }
 
 /* ---------------------------------------------------------------
@@ -1182,7 +1186,7 @@ const State = {
   returnToReview: false,
 };
 
-const DEFAULT_PREFS = {boardSize:9, setupColor:'alt', firstMover:'B', dailyLimit:20, lastFolder:'', autoCrop:true, showCoords:false};
+const DEFAULT_PREFS = {boardSize:9, setupColor:'alt', firstMover:'B', dailyLimit:20, lastFolder:'', autoCrop:true, showCoords:false, autoTitle:true, titleTemplate:'Problema {}', nextNumber:1, reviewLog:{date:'', ids:[]}};
 
 function freshCreate(){
   const d = State.prefs || DEFAULT_PREFS;
@@ -1198,6 +1202,7 @@ function freshCreate(){
     path: [tree],             // ruta desde la raíz hasta el nodo que se está viendo/editando
     marks: [],             // [{x,y,type:'triangle'|'square'|'number'}]
     markShape: 'triangle',
+    title: (!d.lastTitleTemplate ? '' : d.lastTitleTemplate),
     note: '',
     mode: 'setup',        // 'setup' | 'tree' | 'marks'
     forceFullBoard: false,  // ver el tablero sin recortar, por si necesitas un punto fuera del recorte
@@ -1252,6 +1257,16 @@ async function updateDueBadge(){
   else badge.style.display='none';
 }
 
+function reviewedTodayIds(){
+  const log = State.prefs && State.prefs.reviewLog;
+  return (log && log.date===todayISO()) ? log.ids : [];
+}
+async function logReviewedToday(id){
+  const ids = reviewedTodayIds().slice();
+  if(!ids.includes(id)) ids.push(id);
+  State.prefs = Object.assign({}, State.prefs, {reviewLog:{date:todayISO(), ids}});
+  await storeSet('prefs', State.prefs);
+}
 async function buildReviewQueue(){
   State.cards = await storeListCards();
   const t = todayISO();
@@ -1259,9 +1274,13 @@ async function buildReviewQueue(){
   let due = State.cards.filter(c=>treeHasVerdict(c.tree,'correct') && c.srs.due<=t);
   if(studyFolders) due = due.filter(c=>studyFolders.includes(c.folder||''));
   due.sort((a,b)=>a.srs.due.localeCompare(b.srs.due));
+  const done = reviewedTodayIds();
+  const repeats = due.filter(c=>done.includes(c.id));   // falladas hoy: vuelven sin gastar límite
+  const fresh = due.filter(c=>!done.includes(c.id));
   const limit = (State.prefs && State.prefs.dailyLimit) || 0;
+  const room = limit>0 ? Math.max(0, limit - done.length) : fresh.length;
   State.reviewQueueTotal = due.length;
-  State.reviewQueue = limit>0 ? due.slice(0, limit) : due;
+  State.reviewQueue = fresh.slice(0, room).concat(repeats);
   State.reviewIdx = 0;
   startReviewStep();
 }
@@ -1366,9 +1385,13 @@ async function autoPlayOpponent(){
 /* ---------------------------------------------------------------
    Render principal
 --------------------------------------------------------------- */
+let lastRenderedView = null;
 function render(){
   const view = document.getElementById('view');
+  const keepY = lastRenderedView===State.view ? window.scrollY : 0;
+  lastRenderedView = State.view;
   view.innerHTML = '';
+  setTimeout(()=>window.scrollTo(0, keepY), 0);
   if(State.view==='create') renderCreate(view);
   else if(State.view==='review') renderReview(view);
   else if(State.view==='settings') renderSettings(view);
@@ -1479,25 +1502,6 @@ function renderCreate(root){
   const showCoords = !!(State.prefs && State.prefs.showCoords);
   renderBoard(boardWrap, st.boardSize, stones, (x,y)=>handleCreateClick(x,y), null, st.marks, numbers, crop, showCoords);
 
-  // alternar entre vista recortada y tablero completo (por si un punto queda fuera del recorte)
-  if(!State.prefs || State.prefs.autoCrop!==false){
-    const zoomRow = document.createElement('div'); zoomRow.className='btnrow'; zoomRow.style.margin='0 0 8px';
-    const zoomBtn = document.createElement('button'); zoomBtn.className='btn ghost small';
-    zoomBtn.textContent = st.forceFullBoard ? 'Volver a la vista recortada' : 'Ver tablero completo';
-    zoomBtn.addEventListener('click', ()=>{ st.forceFullBoard = !st.forceFullBoard; render(); });
-    zoomRow.appendChild(zoomBtn);
-    root.appendChild(zoomRow);
-  }
-
-  // acciones inmediatas, justo debajo del tablero
-  if(st.mode==='setup' || st.mode==='marks'){
-    const editRow = document.createElement('div'); editRow.className='btnrow';
-    const undoBtn = document.createElement('button'); undoBtn.className='btn ghost small'; undoBtn.textContent='Deshacer último punto';
-    undoBtn.addEventListener('click', ()=>{ undoLastCreateAction(st); render(); });
-    editRow.appendChild(undoBtn);
-    root.appendChild(editRow);
-  }
-
   let counts = {correct:0, wrong:0, unmarked:0};
   if(st.mode==='tree'){
     counts = countLeavesByVerdict(st.tree);
@@ -1534,36 +1538,24 @@ function renderCreate(root){
       };
       verdictRow.appendChild(mkVerdictBtn('correct','✓ Correcta','var(--pine)'));
       verdictRow.appendChild(mkVerdictBtn('wrong','✗ Incorrecta','var(--shu)'));
-      const delBtn = document.createElement('button'); delBtn.className='btn ghost small';
-      delBtn.textContent = cursor.children.length ? 'Eliminar rama' : 'Eliminar';
-      delBtn.addEventListener('click', ()=>{
-        if(cursor.children.length && !confirm('Esta rama tiene jugadas después. ¿Eliminar todo?')) return;
-        const parent = st.path[st.path.length-2];
-        parent.children = parent.children.filter(c=>c!==cursor);
-        st.path.pop();
-        render();
-      });
-      verdictRow.appendChild(delBtn);
       verdictField.appendChild(verdictRow);
       root.appendChild(verdictField);
     }
   }
 
-  // guardar — justo debajo de las acciones del tablero, antes de nota/carpeta
   const hasCorrect = treeHasVerdict(st.tree, 'correct');
   const hasAnything = hasCorrect || st.setup.length>0 || st.tree.children.length>0;
+
+  // fila 1: guardar · nueva
   const saveRow = document.createElement('div'); saveRow.className='btnrow';
   const saveBtn = document.createElement('button'); saveBtn.className='btn pine';
   saveBtn.textContent = st.id ? 'Guardar cambios' : 'Guardar tarjeta';
   saveBtn.disabled = !hasAnything;
   saveBtn.addEventListener('click', saveCurrentCard);
-  saveRow.appendChild(saveBtn);
-  if(st.id || st.setup.length || hasCorrect){
-    const clearBtn = document.createElement('button'); clearBtn.className='btn ghost';
-    clearBtn.textContent = 'Nueva tarjeta';
-    clearBtn.addEventListener('click', ()=>{ State.create = freshCreate(); render(); });
-    saveRow.appendChild(clearBtn);
-  }
+  const clearBtn = document.createElement('button'); clearBtn.className='btn ghost';
+  clearBtn.textContent = 'Nueva tarjeta';
+  clearBtn.addEventListener('click', ()=>{ State.create = freshCreate(); render(); });
+  saveRow.appendChild(saveBtn); saveRow.appendChild(clearBtn);
   root.appendChild(saveRow);
   if(!hasCorrect && hasAnything){
     const draftHint = document.createElement('p'); draftHint.className='hint'; draftHint.style.margin='-6px 0 10px';
@@ -1571,11 +1563,61 @@ function renderCreate(root){
     root.appendChild(draftHint);
   }
 
-  // nota + carpeta (después de guardar, son secundarios)
+  // fila 2: eliminar · ver tablero completo
+  const toolRow = document.createElement('div'); toolRow.className='btnrow';
+  const delBtn = document.createElement('button'); delBtn.className='btn ghost';
+  if(st.mode==='tree'){
+    delBtn.textContent = cursor.children.length ? 'Eliminar rama' : 'Eliminar';
+    delBtn.disabled = cursor.x===null;
+    delBtn.addEventListener('click', ()=>{
+      if(cursor.children.length && !confirm('Esta rama tiene jugadas después. ¿Eliminar todo?')) return;
+      const parent = st.path[st.path.length-2];
+      parent.children = parent.children.filter(c=>c!==cursor);
+      st.path.pop();
+      render();
+    });
+  } else {
+    delBtn.textContent = 'Deshacer último punto';
+    delBtn.disabled = (st.mode==='setup' ? st.setup.length : st.marks.length)===0;
+    delBtn.addEventListener('click', ()=>{ undoLastCreateAction(st); render(); });
+  }
+  toolRow.appendChild(delBtn);
+  if(!State.prefs || State.prefs.autoCrop!==false){
+    const zoomBtn = document.createElement('button'); zoomBtn.className='btn ghost';
+    zoomBtn.textContent = st.forceFullBoard ? 'Vista recortada' : 'Ver tablero completo';
+    zoomBtn.addEventListener('click', ()=>{ st.forceFullBoard = !st.forceFullBoard; render(); });
+    toolRow.appendChild(zoomBtn);
+  }
+  root.appendChild(toolRow);
+
+  // árbol completo — siempre visible en modo árbol (ya no se cierra al moverte)
+  if(st.mode==='tree'){
+    const treeSub = document.createElement('div'); treeSub.style.cssText='font-size:12.5px; color:var(--ink-soft); margin:6px 0 4px;';
+    treeSub.textContent = `Árbol (${counts.correct} correcta${counts.correct===1?'':'s'}, ${counts.wrong} incorrecta${counts.wrong===1?'':'s'}${counts.unmarked?`, ${counts.unmarked} sin marcar`:''})`;
+    root.appendChild(treeSub);
+    const outlineBox = document.createElement('div'); outlineBox.className='lines-box'; outlineBox.style.cssText='max-height:38vh; overflow:auto;';
+    const rootRow = document.createElement('div');
+    rootRow.style.cssText = 'padding:3px 4px; font-size:12.5px; cursor:pointer; border-radius:3px;' + (st.path.length===1 ? ' background:var(--pine-soft);' : '');
+    rootRow.textContent = 'Inicio';
+    rootRow.addEventListener('click', ()=>{ st.path = [st.tree]; render(); });
+    outlineBox.appendChild(rootRow);
+    appendTreeOutline(outlineBox, st.tree, [st.tree], st.boardSize, st.path);
+    root.appendChild(outlineBox);
+  }
+
+  // título + nota + carpeta
+  const titleField = document.createElement('div'); titleField.className='field';
+  titleField.innerHTML = '<label>Título</label>';
+  const titleInput = document.createElement('input'); titleInput.type='text'; titleInput.value=st.title||'';
+  titleInput.placeholder = (!State.prefs || State.prefs.autoTitle!==false) ? autoTitleFor((State.prefs&&State.prefs.nextNumber)||1) : 'Título';
+  titleInput.addEventListener('input', e=>{ st.title = e.target.value; });
+  titleField.appendChild(titleInput);
+  root.appendChild(titleField);
+
   const noteField = document.createElement('div'); noteField.className='field';
   noteField.innerHTML = '<label>Nota (opcional)</label>';
-  const noteInput = document.createElement('input'); noteInput.type='text'; noteInput.value=st.note;
-  noteInput.placeholder='p. ej. Joseki 3-3, contacto por fuera';
+  const noteInput = document.createElement('textarea'); noteInput.style.minHeight='54px'; noteInput.style.height='54px'; noteInput.value=st.note||'';
+  noteInput.placeholder='p. ej. contacto por fuera, cuidado con el ko';
   noteInput.addEventListener('input', e=>{ st.note = e.target.value; });
   noteField.appendChild(noteInput);
   root.appendChild(noteField);
@@ -1597,19 +1639,8 @@ function renderCreate(root){
   const moreDetails = document.createElement('details'); moreDetails.className='sgf-io';
   const moreSummary = document.createElement('summary'); moreSummary.textContent = 'Más opciones';
   moreDetails.appendChild(moreSummary);
-
-  if(st.mode==='tree'){
-    const treeSub = document.createElement('div'); treeSub.style.cssText='font-size:12.5px; color:var(--ink-soft); margin:10px 0 4px;';
-    treeSub.textContent = `Árbol completo (${counts.correct} correcta${counts.correct===1?'':'s'}, ${counts.wrong} incorrecta${counts.wrong===1?'':'s'}${counts.unmarked?`, ${counts.unmarked} sin marcar`:''})`;
-    moreDetails.appendChild(treeSub);
-    const outlineBox = document.createElement('div'); outlineBox.className='lines-box';
-    if(st.tree.children.length===0){
-      outlineBox.innerHTML = '<span style="color:var(--ink-soft); font-size:13px;">Aún no hay jugadas grabadas.</span>';
-    } else {
-      appendTreeOutline(outlineBox, st.tree, [st.tree], st.boardSize, st.path);
-    }
-    moreDetails.appendChild(outlineBox);
-  }
+  moreDetails.open = !!st.moreOpen;
+  moreDetails.addEventListener('toggle', ()=>{ st.moreOpen = moreDetails.open; });
 
   const sizeField = document.createElement('div'); sizeField.className='field'; sizeField.style.marginTop='10px';
   sizeField.innerHTML = '<label>Tamaño del tablero</label>';
@@ -1666,7 +1697,7 @@ function renderCreate(root){
   exportBtn.disabled = !hasCorrect;
   exportBtn.addEventListener('click', ()=>{
     const sgfText = exportSGF(st);
-    downloadText((st.note||'tarjeta').replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', sgfText);
+    downloadText((st.title||'tarjeta').replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', sgfText);
   });
   exportField.appendChild(exportBtn);
   moreDetails.appendChild(exportField);
@@ -1689,7 +1720,7 @@ function pathToMoves(path){
   return path.slice(1).map(n=>({x:n.x,y:n.y,color:n.color}));
 }
 /** Dibuja el árbol completo como una lista anidada clicable, dentro de `container`. */
-function appendTreeOutline(container, node, path, size, currentPath){
+function appendTreeOutline(container, node, path, size, currentPath, onPick){
   node.children.forEach(child=>{
     const childPath = path.concat([child]);
     const isCurrent = currentPath.length===childPath.length && currentPath[currentPath.length-1]===child;
@@ -1697,14 +1728,17 @@ function appendTreeOutline(container, node, path, size, currentPath){
     row.style.cssText = `padding:3px 4px 3px ${(path.length-1)*14}px; font-size:12.5px; cursor:pointer; display:flex; align-items:center; gap:6px; border-radius:3px;`
       + (isCurrent ? ' background:var(--pine-soft);' : '');
     const label = document.createElement('span');
-    label.textContent = `${child.color==='B'?'N':'B'}${coordLabel(child.x,child.y,size)}`;
+    label.textContent = `${path.length}. ${child.color==='B'?'N':'B'}${coordLabel(child.x,child.y,size)}`;
     row.appendChild(label);
     if(child.verdict==='correct'){ const t=document.createElement('span'); t.className='tag correct'; t.textContent='correcta'; row.appendChild(t); }
     else if(child.verdict==='wrong'){ const t=document.createElement('span'); t.className='tag wrong'; t.textContent='incorrecta'; row.appendChild(t); }
     else if(child.children.length===0){ const t=document.createElement('span'); t.style.cssText='font-size:11px; color:var(--ink-soft);'; t.textContent='sin marcar'; row.appendChild(t); }
-    row.addEventListener('click', ()=>{ State.create.path = childPath; render(); });
+    row.addEventListener('click', ()=>{
+      if(onPick) onPick(childPath);
+      else { State.create.path = childPath; render(); }
+    });
     container.appendChild(row);
-    appendTreeOutline(container, child, childPath, size, currentPath);
+    appendTreeOutline(container, child, childPath, size, currentPath, onPick);
   });
 }
 function currentCreateStones(st){
@@ -1782,6 +1816,19 @@ async function saveCurrentCard(){
   const hasCorrect = treeHasVerdict(treeCopy, 'correct');
   if(!hasCorrect && st.setup.length===0 && st.tree.children.length===0) return; // nada que guardar
   const folder = (st.folder||'').trim();
+  let title = (st.title||'').trim();
+  let titleTpl = '';
+  if(title.includes('{}')){
+    const n = (State.prefs && State.prefs.nextNumber) || 1;
+    titleTpl = title;
+    title = title.split('{}').join(n);
+    State.prefs = Object.assign({}, State.prefs, {nextNumber: n+1});
+  } else if(!title && (!State.prefs || State.prefs.autoTitle!==false)){
+    const n = (State.prefs && State.prefs.nextNumber) || 1;
+    title = autoTitleFor(n);
+    State.prefs = Object.assign({}, State.prefs, {nextNumber: n+1});
+  }
+  State.prefs = Object.assign({}, State.prefs, {lastTitleTemplate: titleTpl}); // el título con {} se conserva para la siguiente tarjeta
   const wasEdit = !!st.id;
   const existing = wasEdit ? State.cards.find(c=>c.id===st.id) : null;
   const wasEditingDraft = wasEdit && existing && isDraftCard(existing);
@@ -1792,7 +1839,8 @@ async function saveCurrentCard(){
     folder,
     tree: treeCopy,
     marks: st.marks,
-    note: st.note,
+    title,
+    note: (st.note||'').trim(),
     createdAt: (existing && existing.createdAt) || Date.now(),
     srs: existing ? existing.srs || defaultSRS() : defaultSRS(),
   };
@@ -1886,6 +1934,7 @@ function renderImportPicker(root, st){
     st.tree = linesToTree(chosen, wrongChosen);
     st.path = [st.tree];
     if(st.tree.children[0]){ st.firstMover = st.tree.children[0].color; }
+    st.title = parsed.name || st.title;
     st.note = parsed.comment || st.note;
     st.mode = 'setup';
     delete st.importPicker;
@@ -1942,7 +1991,9 @@ function renderReview(root){
 
   if(!card){
     const empty = document.createElement('div'); empty.className='empty';
-    empty.innerHTML = `<div class="big">Nada pendiente por hoy</div><div>${fmtDate(todayISO())} — vuelve mañana o crea nuevas tarjetas.</div>`;
+    empty.innerHTML = State.reviewQueueTotal>0
+      ? `<div class="big">Límite diario alcanzado</div><div>${reviewedTodayIds().length} repasadas hoy · quedan ${State.reviewQueueTotal} pendientes.</div>`
+      : `<div class="big">Nada pendiente por hoy</div><div>${fmtDate(todayISO())} — vuelve mañana o crea nuevas tarjetas.</div>`;
     root.appendChild(empty);
     return;
   }
@@ -2052,14 +2103,15 @@ if (msgHtml) {
   }
 
   if(step.status==='finished'){
-    const wrongPaths = collectVerdictPaths(card.tree, 'wrong');
-    const wrongBox = wrongPaths.length ? (()=>{
-      const box = document.createElement('div'); box.className='lines-box';
-      box.innerHTML = `<div style="font-size:12.5px; color:var(--ink-soft); margin-bottom:4px;">Errores conocidos en esta posición:</div>` +
-        wrongPaths.map(l=>`<div class="line-item"><span class="tag wrong">evitar</span>${lineToText(l, card.boardSize)}</div>`).join('');
-      return box;
-    })() : null;
-    if(wrongBox) root.appendChild(wrongBox);
+    if(!step.viewPath) step.viewPath = findNodePath(card.tree, step.cursor) || [card.tree];
+    const treeBox = document.createElement('div'); treeBox.className='lines-box'; treeBox.style.cssText='max-height:38vh; overflow:auto;';
+    const startRow = document.createElement('div');
+    startRow.style.cssText = 'padding:3px 4px; font-size:12.5px; cursor:pointer; border-radius:3px;' + (step.viewPath.length===1 ? ' background:var(--pine-soft);' : '');
+    startRow.textContent = 'Inicio';
+    startRow.addEventListener('click', ()=>showReviewPath([card.tree]));
+    treeBox.appendChild(startRow);
+    appendTreeOutline(treeBox, card.tree, [card.tree], card.boardSize, step.viewPath, showReviewPath);
+    root.appendChild(treeBox);
 
     const resultBox = document.createElement('div'); resultBox.className='lines-box';
     resultBox.innerHTML = `<div style="font-size:13.5px;">${describeNextReview(step.previewSchedule)}</div>`;
@@ -2073,6 +2125,20 @@ if (msgHtml) {
   }
 }
 
+function findNodePath(root, target){
+  if(root===target) return [root];
+  for(const c of root.children){ const r = findNodePath(c, target); if(r) return [root].concat(r); }
+  return null;
+}
+/** Muestra en el tablero la posición de un nodo del árbol (solo tras terminar la tarjeta). */
+function showReviewPath(path){
+  const step = State.reviewStep, card = State.reviewQueue[State.reviewIdx];
+  const moves = pathToMoves(path);
+  const {stones, numbers} = buildLineDisplay(card.boardSize, card.setup, moves);
+  step.placed = stones; step.numbers = numbers; step.moveCount = moves.length;
+  step.cursor = path[path.length-1]; step.viewPath = path; step.markers = new Map();
+  render();
+}
 function handleReviewPoint(x,y){
   const step = State.reviewStep;
   const card = State.reviewQueue[State.reviewIdx];
@@ -2174,6 +2240,7 @@ async function advanceReviewQueue(){
   const step = State.reviewStep;
   card.srs = step.previewSchedule || schedule(card.srs, step.autoRating);
   await storeSet('card:'+card.id, card);
+  await logReviewedToday(card.id);
   State.reviewIdx += 1;
   startReviewStep();
   State.cards = await storeListCards();
@@ -2189,7 +2256,7 @@ function naturalCompare(a, b){
   return a.localeCompare(b, 'es', {numeric:true, sensitivity:'base'});
 }
 function cardSortLabel(card){
-  return (card.note && card.note.trim()) || 'Sin nota';
+  return (card.title && card.title.trim()) || (card.note && card.note.trim()) || 'Sin título';
 }
 function compareCards(a, b, sortKey){
   switch(sortKey){
@@ -2225,7 +2292,7 @@ function renderList(root){
   const searchField = document.createElement('div'); searchField.className='field';
   const searchInput = document.createElement('input'); searchInput.type='text';
   searchInput.id = 'list-search-input';
-  searchInput.placeholder='Buscar por nota…';
+  searchInput.placeholder='Buscar por título o nota…';
   searchInput.value = State.listSearch || '';
   searchInput.addEventListener('input', e=>{
     const cursorPos = e.target.selectionStart;
@@ -2275,13 +2342,13 @@ function renderList(root){
 
   root.appendChild(filterRow);
 
-  if(draftCount>0 || State.listDraftsOnly){
+  {
     const draftToggleRow = document.createElement('div'); draftToggleRow.className='btnrow';
     const draftBtn = document.createElement('button');
     draftBtn.className = 'btn' + (State.listDraftsOnly ? ' on' : ' ghost');
     draftBtn.textContent = State.listDraftsOnly
-      ? (draftCount>0 ? `Mostrando solo borradores (${draftCount})` : 'Mostrando solo borradores (0) — toca para ver todas')
-      : `Solo borradores (${draftCount})`;
+      ? `Mostrando borradores (${draftCount}) — ver todas`
+      : `Mostrar borradores (${draftCount})`;
     draftBtn.addEventListener('click', ()=>{ State.listDraftsOnly = !State.listDraftsOnly; render(); });
     draftToggleRow.appendChild(draftBtn);
     root.appendChild(draftToggleRow);
@@ -2293,13 +2360,13 @@ function renderList(root){
     if(State.listFolder==='all'){ /* sin filtro de carpeta */ }
     else if(State.listFolder==='__none__'){ if(c.folder) return false; }
     else if(c.folder!==State.listFolder) return false;
-    if(searchQuery && !(c.note||'').toLowerCase().includes(searchQuery)) return false;
+    if(searchQuery && !((c.title||'')+' '+(c.note||'')).toLowerCase().includes(searchQuery)) return false;
     return true;
   });
 
   if(filtered.length===0){
     const empty = document.createElement('div'); empty.className='empty';
-    empty.innerHTML = `<div class="big">Nada que mostrar</div><div>${searchQuery ? 'Ninguna nota coincide con la búsqueda.' : (State.listDraftsOnly ? 'No hay borradores con este filtro.' : 'Ninguna tarjeta coincide con este filtro.')}</div>`;
+    empty.innerHTML = `<div class="big">Nada que mostrar</div><div>${searchQuery ? 'Nada coincide con la búsqueda.' : (State.listDraftsOnly ? 'No hay borradores con este filtro.' : 'Ninguna tarjeta coincide con este filtro.')}</div>`;
     root.appendChild(empty);
     return;
   }
@@ -2344,8 +2411,9 @@ function renderCardItem(root, card){
   const statusNote = isDraft
     ? '<span class="tag" style="background:var(--paper-deep); color:var(--ink-soft);">borrador</span> falta la línea correcta'
     : `${firstPath ? firstPath.length : 0} jugadas${variantNote} · vence ${fmtDate(card.srs.due)}${card.srs.due<=todayISO() ? ' · pendiente':''}`;
-  info.innerHTML = `<div class="note">${card.note || '(sin nota)'}</div>
-    <div class="meta">${card.boardSize}×${card.boardSize} · ${statusNote}</div>`;
+  info.innerHTML = `<div class="note">${esc(card.title) || '(sin título)'}</div>
+    <div class="meta">${card.boardSize}×${card.boardSize} · ${statusNote}</div>`
+    + (card.note ? `<div class="meta" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(card.note)}</div>` : '');
   item.appendChild(info);
 
   const actions = document.createElement('div'); actions.className='actions';
@@ -2361,7 +2429,7 @@ function renderCardItem(root, card){
   });
   const sgfBtn = document.createElement('button'); sgfBtn.className='btn ghost small'; sgfBtn.textContent='.sgf';
   sgfBtn.addEventListener('click', ()=>{
-    downloadText((card.note||'tarjeta').replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', exportSGF(card));
+    downloadText((card.title||'tarjeta').replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', exportSGF(card));
   });
   actions.appendChild(editBtn); actions.appendChild(sgfBtn); actions.appendChild(delBtn);
   item.appendChild(actions);
@@ -2380,7 +2448,7 @@ function editCard(card){
     path: [treeCopy],
     marks: JSON.parse(JSON.stringify(card.marks||[])),
     markShape: 'triangle', setupColor: (State.prefs && State.prefs.setupColor) || 'alt',
-    note: card.note || '', mode: isDraftCard(card) ? 'tree' : 'setup',
+    title: card.title || '', note: card.note || '', mode: isDraftCard(card) ? 'tree' : 'setup',
     forceFullBoard: false,
   };
 }
@@ -2416,6 +2484,42 @@ function renderSettings(root){
   limitHint.textContent = 'Si hay más pendientes que el límite, se muestran primero las más antiguas.';
   limitField.appendChild(limitHint);
   root.appendChild(limitField);
+
+  const numTitle = document.createElement('h2'); numTitle.className='section-title'; numTitle.style.fontSize='16px'; numTitle.textContent='Títulos';
+  root.appendChild(numTitle);
+  const autoRow = document.createElement('label');
+  autoRow.style.cssText = 'display:flex; align-items:center; gap:8px; padding:5px 0; font-size:13.5px;';
+  const autoChk = document.createElement('input'); autoChk.type='checkbox'; autoChk.checked = !State.prefs || State.prefs.autoTitle!==false;
+  autoChk.addEventListener('change', async ()=>{
+    State.prefs = Object.assign({}, State.prefs, {autoTitle: autoChk.checked});
+    await storeSet('prefs', State.prefs); render();
+  });
+  autoRow.appendChild(autoChk);
+  const autoSpan = document.createElement('span'); autoSpan.textContent='Numerar automáticamente las tarjetas sin título';
+  autoRow.appendChild(autoSpan);
+  root.appendChild(autoRow);
+  if(!State.prefs || State.prefs.autoTitle!==false){
+    const numRow = document.createElement('div'); numRow.className='row';
+    const tplField = document.createElement('div'); tplField.className='field';
+    tplField.innerHTML = '<label>Formato ({} = número)</label>';
+    const tplInput = document.createElement('input'); tplInput.type='text'; tplInput.value = (State.prefs && State.prefs.titleTemplate) || 'Problema {}';
+    tplInput.addEventListener('change', async ()=>{
+      State.prefs = Object.assign({}, State.prefs, {titleTemplate: tplInput.value.trim() || 'Problema {}'});
+      await storeSet('prefs', State.prefs); render();
+    });
+    tplField.appendChild(tplInput);
+    const cntField = document.createElement('div'); cntField.className='field';
+    cntField.innerHTML = '<label>Siguiente número</label>';
+    const cntInput = document.createElement('input'); cntInput.type='text'; cntInput.inputMode='numeric'; cntInput.value = (State.prefs && State.prefs.nextNumber) || 1;
+    cntInput.addEventListener('change', async ()=>{
+      let n = parseInt(cntInput.value,10); if(isNaN(n) || n<0) n = 1;
+      State.prefs = Object.assign({}, State.prefs, {nextNumber: n});
+      await storeSet('prefs', State.prefs); render();
+    });
+    cntField.appendChild(cntInput);
+    numRow.appendChild(tplField); numRow.appendChild(cntField);
+    root.appendChild(numRow);
+  }
 
   const displayTitle = document.createElement('h2'); displayTitle.className='section-title'; displayTitle.style.fontSize='16px'; displayTitle.textContent='Tablero';
   root.appendChild(displayTitle);
@@ -2507,7 +2611,7 @@ function renderSettings(root){
   exportZipBtn.addEventListener('click', ()=>{
     const used = new Set();
     const files = cards.map(card=>{
-      let base = (card.note||'tarjeta').replace(/[^a-z0-9]+/gi,'_').toLowerCase() || 'tarjeta';
+      let base = (card.title||'tarjeta').replace(/[^a-z0-9]+/gi,'_').toLowerCase() || 'tarjeta';
       let name = base+'.sgf', n=2;
       while(used.has(name)){ name = `${base}_${n}.sgf`; n++; }
       used.add(name);
@@ -2618,7 +2722,8 @@ async function importBulkFile(file){
           folder: '',
           tree: linesToTree(correctLines, wrongLines),
           marks: parsed.marks || [],
-          note: parsed.comment || entry.name.replace(/\.sgf$/i,''),
+          title: parsed.name || entry.name.replace(/\.sgf$/i,''),
+          note: parsed.comment || '',
           createdAt: Date.now(),
           srs: defaultSRS(),
         };
