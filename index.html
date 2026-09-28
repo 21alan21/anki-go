@@ -615,6 +615,14 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers, 
   for(let i=offsetX; i<offsetX+cols; i++){
     svg.appendChild(el("line",{x1:sx(i),y1:sy(offsetY),x2:sx(i),y2:sy(offsetY+rows-1),stroke:"var(--wood-line)","stroke-width":0.25}));
   }
+  // resaltar los bordes que son la pared real del tablero (no solo un corte del recorte)
+  if(crop){
+    const wallW = 1;
+    if(offsetX===0) svg.appendChild(el("line",{x1:sx(offsetX),y1:sy(offsetY),x2:sx(offsetX),y2:sy(offsetY+rows-1),stroke:"var(--wood-line)","stroke-width":wallW}));
+    if(offsetX+cols-1===size-1) svg.appendChild(el("line",{x1:sx(offsetX+cols-1),y1:sy(offsetY),x2:sx(offsetX+cols-1),y2:sy(offsetY+rows-1),stroke:"var(--wood-line)","stroke-width":wallW}));
+    if(offsetY===0) svg.appendChild(el("line",{x1:sx(offsetX),y1:sy(offsetY),x2:sx(offsetX+cols-1),y2:sy(offsetY),stroke:"var(--wood-line)","stroke-width":wallW}));
+    if(offsetY+rows-1===size-1) svg.appendChild(el("line",{x1:sx(offsetX),y1:sy(offsetY+rows-1),x2:sx(offsetX+cols-1),y2:sy(offsetY+rows-1),stroke:"var(--wood-line)","stroke-width":wallW}));
+  }
   // star points (solo si caen dentro del rango visible)
   starPoints(size).forEach(([x,y])=>{
     if(x<offsetX || x>=offsetX+cols || y<offsetY || y>=offsetY+rows) return;
@@ -727,11 +735,20 @@ function computeCropBounds(size, setup, tree, marks){
   if(tree) collectAllTreePoints(tree, pts);
   (marks||[]).forEach(m=>pts.push({x:m.x,y:m.y}));
   if(pts.length===0) return null;
-  let minX=Math.min(...pts.map(p=>p.x)), maxX=Math.max(...pts.map(p=>p.x));
-  let minY=Math.min(...pts.map(p=>p.y)), maxY=Math.max(...pts.map(p=>p.y));
-  const margin = 2;
-  minX = Math.max(0, minX-margin); maxX = Math.min(size-1, maxX+margin);
-  minY = Math.max(0, minY-margin); maxY = Math.min(size-1, maxY+margin);
+  const rawMinX=Math.min(...pts.map(p=>p.x)), rawMaxX=Math.max(...pts.map(p=>p.x));
+  const rawMinY=Math.min(...pts.map(p=>p.y)), rawMaxY=Math.max(...pts.map(p=>p.y));
+  const margin = 3;
+  // margen deseado a cada lado; si un lado choca con la pared real del tablero,
+  // el margen que se pierde ahí se traslada al lado opuesto (que sí tiene espacio).
+  function withCompensation(rawMin, rawMax){
+    let lo = rawMin - margin, hi = rawMax + margin;
+    if(lo < 0){ hi += (0 - lo); lo = 0; }
+    if(hi > size-1){ lo -= (hi - (size-1)); hi = size-1; }
+    lo = Math.max(0, lo); hi = Math.min(size-1, hi);
+    return [lo, hi];
+  }
+  let [minX, maxX] = withCompensation(rawMinX, rawMaxX);
+  let [minY, maxY] = withCompensation(rawMinY, rawMaxY);
   const minSpan = 6;
   if(maxX-minX < minSpan){
     const center = (minX+maxX)/2;
@@ -1183,6 +1200,7 @@ function freshCreate(){
     markShape: 'triangle',
     note: '',
     mode: 'setup',        // 'setup' | 'tree' | 'marks'
+    forceFullBoard: false,  // ver el tablero sin recortar, por si necesitas un punto fuera del recorte
   };
 }
 function saveCreateDefaults(st){
@@ -1456,10 +1474,20 @@ function renderCreate(root){
   root.appendChild(boardWrap);
 
   const {stones, numbers} = currentCreateStones(st);
-  const cropOn = !State.prefs || State.prefs.autoCrop!==false;
+  const cropOn = (!State.prefs || State.prefs.autoCrop!==false) && !st.forceFullBoard;
   const crop = cropOn ? computeCropBounds(st.boardSize, st.setup, st.tree, st.marks) : null;
   const showCoords = !!(State.prefs && State.prefs.showCoords);
   renderBoard(boardWrap, st.boardSize, stones, (x,y)=>handleCreateClick(x,y), null, st.marks, numbers, crop, showCoords);
+
+  // alternar entre vista recortada y tablero completo (por si un punto queda fuera del recorte)
+  if(!State.prefs || State.prefs.autoCrop!==false){
+    const zoomRow = document.createElement('div'); zoomRow.className='btnrow'; zoomRow.style.margin='0 0 8px';
+    const zoomBtn = document.createElement('button'); zoomBtn.className='btn ghost small';
+    zoomBtn.textContent = st.forceFullBoard ? 'Volver a la vista recortada' : 'Ver tablero completo';
+    zoomBtn.addEventListener('click', ()=>{ st.forceFullBoard = !st.forceFullBoard; render(); });
+    zoomRow.appendChild(zoomBtn);
+    root.appendChild(zoomRow);
+  }
 
   // acciones inmediatas, justo debajo del tablero
   if(st.mode==='setup' || st.mode==='marks'){
@@ -1532,7 +1560,7 @@ function renderCreate(root){
   saveRow.appendChild(saveBtn);
   if(st.id || st.setup.length || hasCorrect){
     const clearBtn = document.createElement('button'); clearBtn.className='btn ghost';
-    clearBtn.textContent = 'Nueva tarjeta en blanco';
+    clearBtn.textContent = 'Nueva tarjeta';
     clearBtn.addEventListener('click', ()=>{ State.create = freshCreate(); render(); });
     saveRow.appendChild(clearBtn);
   }
@@ -1922,25 +1950,25 @@ function renderReview(root){
   const uColor = userColorFor(card);
   const p = document.createElement('p'); p.className='hint';
   const limitNote = State.reviewQueueTotal>State.reviewQueue.length ? ` (límite diario · quedan ${State.reviewQueueTotal-State.reviewQueue.length} para otro día)` : '';
-  p.innerHTML = `Tarjeta ${State.reviewIdx+1} de ${State.reviewQueue.length}${limitNote}${card.note ? ' · '+card.note : ''} · juegas con <strong>${uColor==='B'?'Negro ⚫':'Blanco ⚪'}</strong>`;
+  p.innerHTML = `Tarjeta ${State.reviewIdx+1} de ${State.reviewQueue.length}`;
   root.appendChild(p);
 
   const step = State.reviewStep;
   const turnColor = nextMoveColor(card, step.moveCount);
   const isUserTurn = (step.status==='guessing' || step.status==='following-wrong') && turnColor===uColor;
 
-  const status = document.createElement('div'); status.className='status-line';
-  let msgHtml;
-  if(step.msg) msgHtml = `<span class="msg ${step.msgType}">${step.msg}</span>`;
-  else if(step.status==='exploring') msgHtml = 'Explorando libremente — estas jugadas no se califican.';
-  else if(step.pending) msgHtml = 'Jugada seleccionada — toca de nuevo el mismo punto para confirmar, o usa el botón.';
-  else if(isUserTurn) msgHtml = `Te toca jugar (${uColor==='B'?'Negro':'Blanco'}).`;
-  else msgHtml = `Turno de ${turnColor==='B'?'Negro':'Blanco'}${turnColor!==uColor?' (automático)':''}…`;
-  const lens = collectVerdictPaths(card.tree,'correct').map(l=>l.length);
-  const minLen = Math.min(...lens), maxLen = Math.max(...lens);
-  const progressLabel = minLen===maxLen ? `${step.moveCount}/${minLen}` : `${step.moveCount} (${minLen}–${maxLen})`;
-  status.innerHTML = `<span>${msgHtml}</span><span>${progressLabel}</span>`;
+let msgHtml;
+
+if(step.msg) msgHtml = `<span class="msg ${step.msgType}">${step.msg}</span>`;
+else if(step.status==='exploring') msgHtml = 'Explorando libremente — estas jugadas no se califican.';
+else msgHtml = '';
+
+if (msgHtml) {
+  const status = document.createElement('div');
+  status.className = 'status-line';
+  status.innerHTML = msgHtml;
   root.appendChild(status);
+}
 
   // indicador de turno
   const turnRow = document.createElement('div'); turnRow.style.cssText='display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:12.5px; color:var(--ink-soft);';
@@ -1950,14 +1978,14 @@ function renderReview(root){
   const turnLabel = document.createElement('span');
   turnLabel.textContent = step.status==='exploring'
     ? 'Modo exploración'
-    : `Le toca a ${turnColor==='B'?'Negro':'Blanco'}${turnColor===uColor ? ' (tú)' : ' (rival)'}`;
+    : `Juega ${turnColor==='B'?'Negro':'Blanco'}${turnColor===uColor ? ' (tú)' : ' (rival)'}`;
   turnRow.appendChild(turnLabel);
   root.appendChild(turnRow);
 
   const boardWrap = document.createElement('div'); boardWrap.className='board-wrap';
   root.appendChild(boardWrap);
   const interactive = isUserTurn || step.status==='exploring';
-  const cropOn = !State.prefs || State.prefs.autoCrop!==false;
+  const cropOn = (!State.prefs || State.prefs.autoCrop!==false) && step.status!=='exploring';
   const crop = cropOn ? computeCropBounds(card.boardSize, card.setup, card.tree, card.marks) : null;
   const showCoords = !!(State.prefs && State.prefs.showCoords);
   renderBoard(boardWrap, card.boardSize, step.placed, interactive ? (x,y)=>handleReviewPoint(x,y) : null, step.markers, card.marks, step.numbers, crop, showCoords);
@@ -2247,11 +2275,13 @@ function renderList(root){
 
   root.appendChild(filterRow);
 
-  if(draftCount>0){
+  if(draftCount>0 || State.listDraftsOnly){
     const draftToggleRow = document.createElement('div'); draftToggleRow.className='btnrow';
     const draftBtn = document.createElement('button');
     draftBtn.className = 'btn' + (State.listDraftsOnly ? ' on' : ' ghost');
-    draftBtn.textContent = State.listDraftsOnly ? `Mostrando solo borradores (${draftCount})` : `Solo borradores (${draftCount})`;
+    draftBtn.textContent = State.listDraftsOnly
+      ? (draftCount>0 ? `Mostrando solo borradores (${draftCount})` : 'Mostrando solo borradores (0) — toca para ver todas')
+      : `Solo borradores (${draftCount})`;
     draftBtn.addEventListener('click', ()=>{ State.listDraftsOnly = !State.listDraftsOnly; render(); });
     draftToggleRow.appendChild(draftBtn);
     root.appendChild(draftToggleRow);
@@ -2351,6 +2381,7 @@ function editCard(card){
     marks: JSON.parse(JSON.stringify(card.marks||[])),
     markShape: 'triangle', setupColor: (State.prefs && State.prefs.setupColor) || 'alt',
     note: card.note || '', mode: isDraftCard(card) ? 'tree' : 'setup',
+    forceFullBoard: false,
   };
 }
 

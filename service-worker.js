@@ -2,7 +2,7 @@
 // y para que el navegador la considere instalable como PWA.
 // Sube el número de versión cada vez que subas cambios nuevos a GitHub,
 // así los usuarios reciben la actualización.
-const VERSION = 'kifu-v7';
+const VERSION = 'kifu-v8';
 const APP_SHELL = [
   './',
   './index.html',
