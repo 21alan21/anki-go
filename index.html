@@ -345,6 +345,7 @@ function normalizeCard(card){
   }
   if(card.title===undefined){ card.title = card.note || ''; card.note = ''; } // antes la nota hacía de título
   if(!card.note) card.note = '';
+  card.flag = !!card.flag;
   if(!card.folder) card.folder = '';
   if(!card.createdAt) card.createdAt = 0; // tarjetas antiguas sin marca de tiempo
   return card;
@@ -1177,6 +1178,7 @@ const State = {
   listFolder: 'all',
   listSort: 'alpha',
   listDraftsOnly: false,
+  listFlagOnly: false,
   listSearch: '',
   reviewIdx: 0,
   reviewStep: null,
@@ -1531,7 +1533,7 @@ function renderCreate(root){
         const isActive = cursor.verdict===key;
         b.style.cssText = isActive
           ? `background:${activeColor}; border-color:${activeColor}; color:#fff;`
-          : 'background:transparent;';
+          : `background:transparent; border-color:${activeColor}; color:${activeColor};`;
         b.textContent=label;
         b.addEventListener('click', ()=>{ cursor.verdict = (cursor.verdict===key ? null : key); render(); });
         return b;
@@ -1841,6 +1843,7 @@ async function saveCurrentCard(){
     marks: st.marks,
     title,
     note: (st.note||'').trim(),
+    flag: !!(existing && existing.flag),
     createdAt: (existing && existing.createdAt) || Date.now(),
     srs: existing ? existing.srs || defaultSRS() : defaultSRS(),
   };
@@ -2001,7 +2004,7 @@ function renderReview(root){
   const uColor = userColorFor(card);
   const p = document.createElement('p'); p.className='hint';
   const limitNote = State.reviewQueueTotal>State.reviewQueue.length ? ` (límite diario · quedan ${State.reviewQueueTotal-State.reviewQueue.length} para otro día)` : '';
-  p.innerHTML = `Tarjeta ${State.reviewIdx+1} de ${State.reviewQueue.length}`;
+  p.innerHTML = `Tarjeta ${State.reviewIdx+1} de ${State.reviewQueue.length}` + (card.title ? ` · <strong>${esc(card.title)}</strong>` : '');
   root.appendChild(p);
 
   const step = State.reviewStep;
@@ -2062,7 +2065,7 @@ if (msgHtml) {
     editCard(card);
     switchView('create');
   });
-  confirmRow.appendChild(editCardBtn);
+  if(step.status!=='finished') confirmRow.appendChild(editCardBtn); // al terminar, "Editar" va en su propia fila
   root.appendChild(confirmRow);
 
   // exploración libre
@@ -2104,6 +2107,29 @@ if (msgHtml) {
 
   if(step.status==='finished'){
     if(!step.viewPath) step.viewPath = findNodePath(card.tree, step.cursor) || [card.tree];
+
+    const nextRow = document.createElement('div'); nextRow.className='btnrow';
+    const nextBtn = document.createElement('button'); nextBtn.className='btn pine'; nextBtn.textContent='Siguiente tarjeta';
+    nextBtn.addEventListener('click', ()=>advanceReviewQueue());
+    nextRow.appendChild(nextBtn);
+    root.appendChild(nextRow);
+
+    const actRow = document.createElement('div'); actRow.className='btnrow';
+    const editBtn = document.createElement('button'); editBtn.className='btn ghost small'; editBtn.textContent='Editar';
+    editBtn.addEventListener('click', async ()=>{
+      await commitReview();                 // guarda el resultado antes de salir
+      State.cards = await storeListCards(); await updateDueBadge();
+      State.returnToReview = true;
+      editCard(State.cards.find(c=>c.id===card.id) || card);
+      switchView('create');
+    });
+    actRow.appendChild(editBtn); actRow.appendChild(flagBtn(card));
+    root.appendChild(actRow);
+
+    const resultBox = document.createElement('div'); resultBox.className='lines-box';
+    resultBox.innerHTML = `<div style="font-size:13.5px;">${describeNextReview(step.previewSchedule)}</div>`;
+    root.appendChild(resultBox);
+
     const treeBox = document.createElement('div'); treeBox.className='lines-box'; treeBox.style.cssText='max-height:38vh; overflow:auto;';
     const startRow = document.createElement('div');
     startRow.style.cssText = 'padding:3px 4px; font-size:12.5px; cursor:pointer; border-radius:3px;' + (step.viewPath.length===1 ? ' background:var(--pine-soft);' : '');
@@ -2112,19 +2138,25 @@ if (msgHtml) {
     treeBox.appendChild(startRow);
     appendTreeOutline(treeBox, card.tree, [card.tree], card.boardSize, step.viewPath, showReviewPath);
     root.appendChild(treeBox);
-
-    const resultBox = document.createElement('div'); resultBox.className='lines-box';
-    resultBox.innerHTML = `<div style="font-size:13.5px;">${describeNextReview(step.previewSchedule)}</div>`;
-    root.appendChild(resultBox);
-
-    const nextRow = document.createElement('div'); nextRow.className='btnrow';
-    const nextBtn = document.createElement('button'); nextBtn.className='btn pine'; nextBtn.textContent='Siguiente tarjeta';
-    nextBtn.addEventListener('click', ()=>advanceReviewQueue());
-    nextRow.appendChild(nextBtn);
-    root.appendChild(nextRow);
+  } else {
+    const flagRow = document.createElement('div'); flagRow.className='btnrow';
+    flagRow.appendChild(flagBtn(card));
+    root.appendChild(flagRow);
   }
 }
 
+async function toggleFlag(card){
+  card.flag = !card.flag;
+  await storeSet('card:'+card.id, card);
+  render();
+}
+function flagBtn(card, small){
+  const b = document.createElement('button');
+  b.className = 'btn small ' + (card.flag ? 'on' : 'ghost');
+  b.textContent = card.flag ? '★ Marcada' : '☆ Marcar';
+  b.addEventListener('click', ()=>toggleFlag(card));
+  return b;
+}
 function findNodePath(root, target){
   if(root===target) return [root];
   for(const c of root.children){ const r = findNodePath(c, target); if(r) return [root].concat(r); }
@@ -2235,12 +2267,15 @@ function revealReviewAnswer(){
   finalizeReview(step, 'Línea correcta revelada.'+extra, 'bad');
   render();
 }
-async function advanceReviewQueue(){
+async function commitReview(){
   const card = State.reviewQueue[State.reviewIdx];
   const step = State.reviewStep;
   card.srs = step.previewSchedule || schedule(card.srs, step.autoRating);
   await storeSet('card:'+card.id, card);
   await logReviewedToday(card.id);
+}
+async function advanceReviewQueue(){
+  await commitReview();
   State.reviewIdx += 1;
   startReviewStep();
   State.cards = await storeListCards();
@@ -2351,12 +2386,19 @@ function renderList(root){
       : `Mostrar borradores (${draftCount})`;
     draftBtn.addEventListener('click', ()=>{ State.listDraftsOnly = !State.listDraftsOnly; render(); });
     draftToggleRow.appendChild(draftBtn);
+    const flagCount = State.cards.filter(c=>c.flag).length;
+    const flagFilter = document.createElement('button');
+    flagFilter.className = 'btn' + (State.listFlagOnly ? ' on' : ' ghost');
+    flagFilter.textContent = State.listFlagOnly ? `Mostrando marcadas (${flagCount})` : `Mostrar marcadas (${flagCount})`;
+    flagFilter.addEventListener('click', ()=>{ State.listFlagOnly = !State.listFlagOnly; render(); });
+    draftToggleRow.appendChild(flagFilter);
     root.appendChild(draftToggleRow);
   }
 
   const searchQuery = (State.listSearch||'').trim().toLowerCase();
   const filtered = State.cards.filter(c=>{
     if(State.listDraftsOnly && !isDraftCard(c)) return false;
+    if(State.listFlagOnly && !c.flag) return false;
     if(State.listFolder==='all'){ /* sin filtro de carpeta */ }
     else if(State.listFolder==='__none__'){ if(c.folder) return false; }
     else if(c.folder!==State.listFolder) return false;
@@ -2366,7 +2408,7 @@ function renderList(root){
 
   if(filtered.length===0){
     const empty = document.createElement('div'); empty.className='empty';
-    empty.innerHTML = `<div class="big">Nada que mostrar</div><div>${searchQuery ? 'Nada coincide con la búsqueda.' : (State.listDraftsOnly ? 'No hay borradores con este filtro.' : 'Ninguna tarjeta coincide con este filtro.')}</div>`;
+    empty.innerHTML = `<div class="big">Nada que mostrar</div><div>${searchQuery ? 'Nada coincide con la búsqueda.' : (State.listFlagOnly ? 'No hay tarjetas marcadas con este filtro.' : State.listDraftsOnly ? 'No hay borradores con este filtro.' : 'Ninguna tarjeta coincide con este filtro.')}</div>`;
     root.appendChild(empty);
     return;
   }
@@ -2411,7 +2453,7 @@ function renderCardItem(root, card){
   const statusNote = isDraft
     ? '<span class="tag" style="background:var(--paper-deep); color:var(--ink-soft);">borrador</span> falta la línea correcta'
     : `${firstPath ? firstPath.length : 0} jugadas${variantNote} · vence ${fmtDate(card.srs.due)}${card.srs.due<=todayISO() ? ' · pendiente':''}`;
-  info.innerHTML = `<div class="note">${esc(card.title) || '(sin título)'}</div>
+  info.innerHTML = `<div class="note">${card.flag ? '★ ' : ''}${esc(card.title) || '(sin título)'}</div>
     <div class="meta">${card.boardSize}×${card.boardSize} · ${statusNote}</div>`
     + (card.note ? `<div class="meta" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(card.note)}</div>` : '');
   item.appendChild(info);
@@ -2431,7 +2473,7 @@ function renderCardItem(root, card){
   sgfBtn.addEventListener('click', ()=>{
     downloadText((card.title||'tarjeta').replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', exportSGF(card));
   });
-  actions.appendChild(editBtn); actions.appendChild(sgfBtn); actions.appendChild(delBtn);
+  actions.appendChild(flagBtn(card)); actions.appendChild(editBtn); actions.appendChild(sgfBtn); actions.appendChild(delBtn);
   item.appendChild(actions);
 
   root.appendChild(item);
