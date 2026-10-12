@@ -1482,16 +1482,30 @@ function renderCreate(root){
     turnRow.appendChild(turnLabel);
     root.appendChild(turnRow);
 
-    // migas de pan: la ruta desde el inicio hasta donde estás parado
-    const crumbRow = document.createElement('div'); crumbRow.style.cssText='display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px;';
-    st.path.forEach((node,i)=>{
-      const chip = document.createElement('button'); chip.className='btn ghost small';
-      chip.style.cssText = 'padding:4px 8px; font-size:11.5px;' + (i===st.path.length-1 ? ' border-color:var(--pine); color:var(--pine);' : '');
-      chip.textContent = i===0 ? 'Inicio' : `${i}.${node.color==='B'?'N':'B'}${coordLabel(node.x,node.y,st.boardSize)}`;
-      chip.addEventListener('click', ()=>{ st.path = st.path.slice(0,i+1); render(); });
-      crumbRow.appendChild(chip);
-    });
-    root.appendChild(crumbRow);
+    // migas de pan: las últimas 10 jugadas de la rama; « › » muestra u oculta el resto
+    if(st.path.length>1){
+      const crumbRow = document.createElement('div'); crumbRow.style.cssText='display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px;';
+      const total = st.path.length-1, KEEP = 10;
+      const hidden = total>KEEP;
+      if(hidden){
+        const arrow = document.createElement('button'); arrow.className='btn ghost small';
+        arrow.style.cssText = 'padding:4px 8px; font-size:11.5px;';
+        arrow.textContent = st.crumbsAll ? '›' : '‹';
+        arrow.title = st.crumbsAll ? 'Ocultar jugadas anteriores' : `Mostrar las ${total-KEEP} jugadas anteriores`;
+        arrow.addEventListener('click', ()=>{ st.crumbsAll = !st.crumbsAll; render(); });
+        crumbRow.appendChild(arrow);
+      }
+      st.path.forEach((node,i)=>{
+        if(i===0) return;
+        if(hidden && !st.crumbsAll && i<=total-KEEP) return;
+        const chip = document.createElement('button'); chip.className='btn ghost small';
+        chip.style.cssText = 'padding:4px 8px; font-size:11.5px;' + (i===st.path.length-1 ? ' border-color:var(--pine); color:var(--pine);' : '');
+        chip.textContent = `${i}.${node.color==='B'?'N':'B'}${coordLabel(node.x,node.y,st.boardSize)}`;
+        chip.addEventListener('click', ()=>{ st.path = st.path.slice(0,i); render(); });
+        crumbRow.appendChild(chip);
+      });
+      root.appendChild(crumbRow);
+    }
   }
 
   // tablero
@@ -1547,6 +1561,23 @@ function renderCreate(root){
 
   const hasCorrect = treeHasVerdict(st.tree, 'correct');
   const hasAnything = hasCorrect || st.setup.length>0 || st.tree.children.length>0;
+
+  // anterior · siguiente (misma carpeta, orden natural por título)
+  if(st.id){
+    const navRow = document.createElement('div'); navRow.className='btnrow';
+    const sibs = State.cards.filter(c=>(c.folder||'')===(st.origFolder||''))
+      .sort((a,b)=>naturalCompare(cardSortLabel(a), cardSortLabel(b)) || a.id.localeCompare(b.id));
+    const idx = sibs.findIndex(c=>c.id===st.id);
+    const prevBtn = document.createElement('button'); prevBtn.className='btn ghost';
+    prevBtn.textContent = '← Anterior'; prevBtn.disabled = idx<=0;
+    prevBtn.addEventListener('click', ()=>goNeighborCard(-1));
+    const nextBtn = document.createElement('button'); nextBtn.className='btn ghost';
+    nextBtn.textContent = 'Siguiente →'; nextBtn.disabled = idx<0 || idx>=sibs.length-1;
+    nextBtn.addEventListener('click', ()=>goNeighborCard(1));
+    navRow.appendChild(prevBtn); navRow.appendChild(nextBtn);
+    if(idx>=0){ const pos=document.createElement('span'); pos.className='hint'; pos.style.cssText='align-self:center; margin:0; white-space:nowrap;'; pos.textContent=`${idx+1}/${sibs.length}`; navRow.insertBefore(pos, nextBtn); }
+    root.appendChild(navRow);
+  }
 
   // fila 1: guardar · nueva
   const saveRow = document.createElement('div'); saveRow.className='btnrow';
@@ -1722,26 +1753,45 @@ function pathToMoves(path){
   return path.slice(1).map(n=>({x:n.x,y:n.y,color:n.color}));
 }
 /** Dibuja el árbol completo como una lista anidada clicable, dentro de `container`. */
-function appendTreeOutline(container, node, path, size, currentPath, onPick){
-  node.children.forEach(child=>{
-    const childPath = path.concat([child]);
-    const isCurrent = currentPath.length===childPath.length && currentPath[currentPath.length-1]===child;
-    const row = document.createElement('div');
-    row.style.cssText = `padding:3px 4px 3px ${(path.length-1)*14}px; font-size:12.5px; cursor:pointer; display:flex; align-items:center; gap:6px; border-radius:3px;`
-      + (isCurrent ? ' background:var(--pine-soft);' : '');
-    const label = document.createElement('span');
-    label.textContent = `${path.length}. ${child.color==='B'?'N':'B'}${coordLabel(child.x,child.y,size)}`;
-    row.appendChild(label);
-    if(child.verdict==='correct'){ const t=document.createElement('span'); t.className='tag correct'; t.textContent='correcta'; row.appendChild(t); }
-    else if(child.verdict==='wrong'){ const t=document.createElement('span'); t.className='tag wrong'; t.textContent='incorrecta'; row.appendChild(t); }
-    else if(child.children.length===0){ const t=document.createElement('span'); t.style.cssText='font-size:11px; color:var(--ink-soft);'; t.textContent='sin marcar'; row.appendChild(t); }
-    row.addEventListener('click', ()=>{
-      if(onPick) onPick(childPath);
-      else { State.create.path = childPath; render(); }
-    });
-    container.appendChild(row);
-    appendTreeOutline(container, child, childPath, size, currentPath, onPick);
+/**
+ * Esquema vertical: una jugada por fila. La línea principal queda a la misma sangría y las
+ * variantes (a partir de la 2.ª continuación) se dibujan antes, sangradas un nivel por rama.
+ */
+function outlineRow(container, node, path, size, currentPath, onPick, depth){
+  const isCurrent = currentPath.length===path.length && currentPath[currentPath.length-1]===node;
+  const row = document.createElement('div');
+  row.style.cssText = 'padding:3px 4px 3px 4px; font-size:12.5px; cursor:pointer; display:flex; align-items:center; gap:6px; border-radius:3px;'
+    + (depth>0 ? ` margin-left:${depth*12}px; border-left:2px solid var(--line);` : '')
+    + (isCurrent ? ' background:var(--pine-soft);' : '');
+  const label = document.createElement('span');
+  label.textContent = `${path.length-1}. ${node.color==='B'?'N':'B'}${coordLabel(node.x,node.y,size)}`;
+  row.appendChild(label);
+  if(node.verdict==='correct'){ const t=document.createElement('span'); t.className='tag correct'; t.textContent='correcta'; row.appendChild(t); }
+  else if(node.verdict==='wrong'){ const t=document.createElement('span'); t.className='tag wrong'; t.textContent='incorrecta'; row.appendChild(t); }
+  else if(node.children.length===0){ const t=document.createElement('span'); t.style.cssText='font-size:11px; color:var(--ink-soft);'; t.textContent='sin marcar'; row.appendChild(t); }
+  row.addEventListener('click', ()=>{
+    if(onPick) onPick(path);
+    else { State.create.path = path; render(); }
   });
+  container.appendChild(row);
+  if(isCurrent){
+    container.style.position = 'relative';
+    setTimeout(()=>{ container.scrollTop = Math.max(0, row.offsetTop - container.clientHeight/2); }, 0);
+  }
+}
+function appendTreeOutline(container, node, path, size, currentPath, onPick, depth){
+  depth = depth || 0;
+  let cur = node, p = path;
+  while(cur.children.length){
+    const kids = cur.children;
+    for(let i=1;i<kids.length;i++){
+      const bp = p.concat([kids[i]]);
+      outlineRow(container, kids[i], bp, size, currentPath, onPick, depth+1);
+      appendTreeOutline(container, kids[i], bp, size, currentPath, onPick, depth+1);
+    }
+    cur = kids[0]; p = p.concat([cur]);
+    outlineRow(container, cur, p, size, currentPath, onPick, depth);
+  }
 }
 function currentCreateStones(st){
   if(st.mode==='tree'){
@@ -1872,11 +1922,21 @@ async function saveCurrentCard(){
       State.create = freshCreate();
       showToast(hasCorrect ? '¡Guardado — no quedan más borradores!' : 'Guardado.');
     }
+  } else if(wasEdit){
+    // tarjeta existente: pasar a la siguiente de su carpeta (orden natural por título), en modo árbol
+    const sibs = State.cards.filter(c=>(c.folder||'')===(card.folder||''))
+      .sort((a,b)=>naturalCompare(cardSortLabel(a), cardSortLabel(b)) || a.id.localeCompare(b.id));
+    const next = sibs[sibs.findIndex(c=>c.id===card.id)+1];
+    if(next){
+      editCard(next);
+      showToast(`Guardado. Siguiente: ${cardSortLabel(next)}.`);
+    } else {
+      editCard(card);
+      showToast('Guardado — era la última de la carpeta.');
+    }
   } else {
     State.create = freshCreate();
-    showToast(wasEdit
-      ? 'Cambios guardados.'
-      : (hasCorrect ? 'Tarjeta guardada — lista para la siguiente.' : 'Borrador guardado — lista para la siguiente.'));
+    showToast(hasCorrect ? 'Tarjeta guardada — lista para la siguiente.' : 'Borrador guardado — lista para la siguiente.');
   }
   render();
 }
@@ -2490,9 +2550,31 @@ function editCard(card){
     path: [treeCopy],
     marks: JSON.parse(JSON.stringify(card.marks||[])),
     markShape: 'triangle', setupColor: (State.prefs && State.prefs.setupColor) || 'alt',
-    title: card.title || '', note: card.note || '', mode: isDraftCard(card) ? 'tree' : 'setup',
+    title: card.title || '', note: card.note || '', mode: 'tree',
     forceFullBoard: false,
   };
+  State.create.origFolder = card.folder || '';
+  State.create.snapshot = editSignature(State.create);
+}
+function editSignature(st){
+  return JSON.stringify([st.boardSize, st.setup, st.tree, st.marks, st.title, st.note, (st.folder||'').trim()]);
+}
+/** Tarjetas de la misma carpeta, en orden natural por título (los números siguen el orden lógico). */
+async function folderSiblings(card){
+  const all = await storeListCards();
+  State.cards = all;
+  return all.filter(c=>(c.folder||'')===(card.origFolder||''))
+    .sort((a,b)=>naturalCompare(cardSortLabel(a), cardSortLabel(b)) || a.id.localeCompare(b.id));
+}
+async function goNeighborCard(dir){
+  const st = State.create;
+  if(editSignature(st)!==st.snapshot && !confirm('Hay cambios sin guardar. ¿Descartarlos?')) return;
+  const list = await folderSiblings(st);
+  const i = list.findIndex(c=>c.id===st.id);
+  const next = list[i+dir];
+  if(!next) return;
+  editCard(next);
+  render();
 }
 
 /* ----------------------- Ajustes ----------------------- */
