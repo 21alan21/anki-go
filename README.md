@@ -2,6 +2,21 @@
 
 App de una sola carpeta, sin backend ni dependencias externas. Todo se guarda en `localStorage` del navegador, en tu propio dispositivo.
 
+## Secciones
+
+- **Tsumegos** — *Repasar* (repetición espaciada con límite diario), *Libre* (resolución libre en orden alfabético o aleatorio, sin límite y sin afectar el calendario), *Tarjetas* (carpetas, marcas, editar) y *Crear* (tablero, árbol de variantes, ramas correcta/incorrecta, importar imagen/SGF).
+- **Partidas** — *Mis partidas*, *Nueva* e *Importar* (SGF). Cada partida guarda título, jugadores (con color), kyu/dan, komi, handicap, fecha, resultado y un comentario por jugada. Visor con árbol horizontal; no entran en el repaso.
+- **Josekis** — *Biblioteca* (un solo árbol SGF; opciones A, B, C…, pérdida de puntos y comentario por jugada, botón «+ Tenuki» solo donde hay tenuki; importar/exportar al final) y *Practicar* (la máquina responde al azar entre tus ramas).
+- **Ajustes** — recorte automático, coordenadas, límite diario, almacenamiento y variantes.
+
+## Jugar en repaso y práctica
+
+Toca un punto para seleccionarlo; doble toque (o **Confirmar jugada**) para jugarlo. En josekis: **Tenuki** muestra su evaluación, **Ver opciones** muestra las letras, **Atrás** retrocede 2 posiciones (tu jugada y la respuesta; 1 si juegas con ambos colores) y **Reiniciar** vuelve al inicio.
+
+## Variantes (Ajustes)
+
+Para tsumegos y para josekis por separado: **posiciones espejo y rotadas** (las 8 simetrías, incluidos los espejos en diagonal) y **colores invertidos**. Se sortean en cada repaso o práctica; las tarjetas y la biblioteca originales no cambian. En la práctica de josekis, si la posición es simétrica, una jugada equivalente por simetría también se acepta.
+
 ## Archivos
 
 ```
