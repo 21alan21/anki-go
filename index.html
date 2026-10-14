@@ -70,9 +70,8 @@
     margin-bottom:18px;
     border-bottom:1px solid var(--line);
   }
-  nav.tabs.sub{margin-top:-8px; margin-bottom:16px; gap:4px; border-bottom:none;}
-  nav.tabs.sub:empty{display:none;}
-  nav.tabs.sub button{font-size:12.5px; border:1px solid var(--line); border-radius:var(--radius); padding:6px 10px; flex:1 0 auto;}
+  nav.tabs.sub{margin-top:-8px; margin-bottom:16px; gap:4px; border-bottom:none; display:grid; grid-template-columns:repeat(4,1fr); min-height:34px; overflow:visible;}
+  nav.tabs.sub button{font-size:12.5px; border:1px solid var(--line); border-radius:var(--radius); padding:6px 4px; white-space:nowrap;}
   nav.tabs.sub button.active{background:var(--ink); color:var(--paper); border-color:var(--ink);}
   nav.tabs{overflow-x:auto; -webkit-overflow-scrolling:touch;}
   nav.tabs button{
@@ -160,6 +159,18 @@
   .opt-panel{margin:0 0 12px; padding:10px 10px 0; border:1px solid var(--line); border-radius:var(--radius); background:var(--paper-deep);}
   button.btn.small{padding:6px 10px; font-size:12.5px;}
 
+  .btnrow.fill .btn{flex:1;}
+  button.star{width:30px; height:30px; padding:0; flex:none; border:1px solid var(--line); background:transparent; color:var(--ink-soft); border-radius:var(--radius); font-size:16px; line-height:1; cursor:pointer;}
+  button.star.on{color:#b8860b; border-color:#b8860b; background:var(--paper-deep);}
+  .titlebar{display:flex; align-items:center; justify-content:space-between; gap:10px;}
+  .titlebar h2{margin-bottom:0; flex:1;}
+  details.info-box{border:1px solid var(--line); border-radius:var(--radius); margin:10px 0; background:var(--paper-deep);}
+  details.info-box summary{padding:8px 10px; font-size:13px; cursor:pointer; color:var(--ink-soft);}
+  details.info-box .lines-box{margin:0; border:none;}
+  .lossrow{display:flex; gap:8px; align-items:flex-start;}
+  .lossrow .loss{width:62px; flex:none;}
+  .lossrow .loss input{text-align:center; padding-left:4px; padding-right:4px;}
+  .lossrow .cmt{flex:1; min-width:0;}
   .btnrow{display:flex; gap:8px; flex-wrap:wrap; margin:10px 0;}
 
   .board-wrap{
@@ -178,7 +189,7 @@
     font-size:13px;
     color:var(--ink-soft);
     margin-bottom:6px;
-    min-height:18px;
+    min-height:34px;
   }
   .status-line .msg.ok{color:var(--pine); font-weight:600;}
   .status-line .msg.bad{color:var(--shu); font-weight:600;}
@@ -336,6 +347,33 @@ async function storeSet(key,val){
     memoryStore.set(key,json);
     return true;
   }
+}
+/** Todo lo guardado (tarjetas, partidas, biblioteca, ajustes) como un objeto {clave: valor}. */
+function storeDump(){
+  const out = {};
+  if(storageMode==='local'){
+    try{
+      for(let i=0;i<localStorage.length;i++){
+        const k = localStorage.key(i);
+        if(k && k.startsWith(LS_PREFIX)){ try{ out[k.slice(LS_PREFIX.length)] = JSON.parse(localStorage.getItem(k)); }catch(e){} }
+      }
+      return out;
+    }catch(e){}
+  }
+  memoryStore.forEach((v,k)=>{ try{ out[k] = JSON.parse(v); }catch(e){} });
+  return out;
+}
+async function restoreBackup(text){
+  let obj; try{ obj = JSON.parse(text); }catch(e){ showToast('El archivo no es un respaldo válido.', 'warn'); render(); return; }
+  if(!obj || obj.app!=='kifu' || !obj.data){ showToast('El archivo no es un respaldo de Kifu.', 'warn'); render(); return; }
+  let n = 0;
+  for(const [k,v] of Object.entries(obj.data)){ await storeSet(k, v); n++; }
+  showToast(`Respaldo restaurado (${n} elementos).`);
+  State.prefs = Object.assign({}, DEFAULT_PREFS, await storeGet('prefs'));
+  State.cards = await storeListCards(); State.book = null; State.bk = null; State.jp = null; State.game = null;
+  State.lists.game = await storeListColl('game');
+  await updateDueBadge();
+  render();
 }
 async function storeDelete(key){
   dataVersion++;
@@ -528,6 +566,107 @@ function recordReviewMove(step, size, x, y, color, moveNumber){
 function newTreeNode(x,y,color){ return {x,y,color,children:[],verdict:null}; }
 function newTreeRoot(){ return {x:null,y:null,color:null,children:[],verdict:null}; }
 function cloneTree(node){ return JSON.parse(JSON.stringify(node)); }
+/* ---- marcas (compartidas por tsumegos, partidas y josekis): triángulo, cuadrado, letra y número ---- */
+const MARK_SHAPES = [['triangle','Triángulo'],['square','Cuadrado'],['label','Letra'],['number','Número']];
+function nextMarkLetter(arr){
+  const used = new Set(arr.filter(m=>m.type==='label').map(m=>m.text));
+  for(let i=0;i<26;i++){ const c = String.fromCharCode(97+i); if(!used.has(c)) return c; }
+  return '?';
+}
+/** Migas de pan: las últimas 10 jugadas de la rama; ‹ muestra el resto. Iguales en tsumegos, partidas y josekis. */
+function moveCrumbs(h, size){
+  if(h.path.length<2) return null;
+  const crumbRow = document.createElement('div'); crumbRow.style.cssText='display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px;';
+  const total = h.path.length-1, KEEP = 10;
+  const hidden = total>KEEP;
+  if(hidden){
+    const arrow = document.createElement('button'); arrow.className='btn ghost small';
+    arrow.style.cssText = 'padding:4px 8px; font-size:11.5px;';
+    arrow.textContent = h.crumbsAll ? '›' : '‹';
+    arrow.title = h.crumbsAll ? 'Ocultar jugadas anteriores' : `Mostrar las ${total-KEEP} jugadas anteriores`;
+    arrow.addEventListener('click', ()=>{ h.crumbsAll = !h.crumbsAll; render(); });
+    crumbRow.appendChild(arrow);
+  }
+  h.path.forEach((node,i)=>{
+    if(i===0) return;
+    if(hidden && !h.crumbsAll && i<=total-KEEP) return;
+    const chip = document.createElement('button'); chip.className='btn ghost small';
+    chip.style.cssText = 'padding:4px 8px; font-size:11.5px;' + (i===h.path.length-1 ? ' border-color:var(--pine); color:var(--pine);' : '');
+    chip.textContent = `${i}.${node.color==='B'?'N':'B'}${coordLabel(node.x,node.y,size)}`;
+    chip.addEventListener('click', ()=>{ h.path = h.path.slice(0,i); render(); });
+    crumbRow.appendChild(chip);
+  });
+  return crumbRow;
+}
+/** Pone / cambia / quita una marca en el punto (x,y) de la lista `arr`. */
+function toggleMarkIn(arr, x, y, shape){
+  const idx = arr.findIndex(m=>m.x===x && m.y===y);
+  const fresh = ()=>{
+    if(shape==='number') return {x,y,type:'number', value: arr.filter(m=>m.type==='number').length+1};
+    if(shape==='label') return {x,y,type:'label', text: nextMarkLetter(arr)};
+    return {x,y,type:shape};
+  };
+  if(idx===-1) arr.push(fresh());
+  else if(arr[idx].type===shape) arr.splice(idx,1);
+  else arr[idx] = fresh();
+}
+function toggleNodeMark(node, x, y, shape){
+  node.marks = node.marks || [];
+  toggleMarkIn(node.marks, x, y, shape);
+  if(!node.marks.length) delete node.marks;
+}
+function marksToSGF(marks){
+  marks = marks || []; if(!marks.length) return '';
+  const pt = m=>String.fromCharCode(97+m.x)+String.fromCharCode(97+m.y);
+  const tr = marks.filter(m=>m.type==='triangle').map(m=>`[${pt(m)}]`).join('');
+  const sq = marks.filter(m=>m.type==='square').map(m=>`[${pt(m)}]`).join('');
+  const lb = marks.filter(m=>m.type==='number' || m.type==='label').map(m=>`[${pt(m)}:${m.type==='number' ? m.value : m.text}]`).join('');
+  return (tr?'TR'+tr:'') + (sq?'SQ'+sq:'') + (lb?'LB'+lb:'');
+}
+function marksFromProps(props, size){
+  const out = [];
+  const add = (v, type, extra)=>{ const q = sgfXY(v); if(q && q.x<size && q.y<size && !out.some(m=>m.x===q.x&&m.y===q.y)) out.push(Object.assign({x:q.x,y:q.y,type}, extra)); };
+  (props.TR||[]).forEach(v=>add(v,'triangle'));
+  (props.SQ||[]).forEach(v=>add(v,'square'));
+  (props.LB||[]).forEach(v=>{
+    const [pt,t] = String(v).split(':');
+    if(!t) return;
+    if(/^\d+$/.test(t)) add(pt,'number',{value:parseInt(t,10)}); else add(pt,'label',{text:t});
+  });
+  return out;
+}
+function mergeMarks(node, list){
+  if(!list.length) return;
+  node.marks = node.marks || [];
+  list.forEach(m=>{ if(!node.marks.some(q=>q.x===m.x && q.y===m.y)) node.marks.push(m); });
+}
+/** «Tipo de marca»: el mismo selector en el editor de tsumegos, partidas y josekis. */
+function markShapeField(holder){
+  const f = document.createElement('div'); f.className='field';
+  f.innerHTML = '<label>Tipo de marca</label>';
+  const tg = document.createElement('div'); tg.className='toggle-group';
+  MARK_SHAPES.forEach(([key,label])=>{
+    const b = document.createElement('button'); b.textContent = label;
+    if((holder.markShape||'triangle')===key) b.classList.add('active');
+    b.addEventListener('click', ()=>{ holder.markShape = key; render(); });
+    tg.appendChild(b);
+  });
+  f.appendChild(tg);
+  return f;
+}
+/** Modo (jugadas / marcas) para partidas y josekis, con el mismo aspecto que el editor de tsumegos. */
+function markToolbar(holder){
+  const box = document.createElement('div');
+  const row = document.createElement('div'); row.className='btnrow fill';
+  [['play','Jugadas'],['marks','Marcas']].forEach(([key,label])=>{
+    const b = document.createElement('button'); b.className = 'btn small' + ((holder.mode||'play')===key ? ' on':' ghost'); b.textContent = label;
+    b.addEventListener('click', ()=>{ holder.mode = key; render(); });
+    row.appendChild(b);
+  });
+  box.appendChild(row);
+  if(holder.mode==='marks') box.appendChild(markShapeField(holder));
+  return box;
+}
 /** Añade una ruta completa de jugadas al árbol, reusando el tronco común existente.
  *  Para veredicto 'wrong', marca el PRIMER punto real de divergencia (donde la rama
  *  no coincide con nada ya existente), para poder avisar el error en cuanto ocurre. */
@@ -746,6 +885,15 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers, 
         svg.appendChild(el("polygon",{points:pts, fill:"none", stroke:color, "stroke-width":1}));
       } else if(m.type==='square'){
         svg.appendChild(el("rect",{x:cx-r, y:cy-r, width:r*2, height:r*2, fill:"none", stroke:color, "stroke-width":1}));
+      } else if(m.type==='label'){
+        const lab = el("text",{
+          x:cx, y:cy, "text-anchor":"middle", "dominant-baseline":"central",
+          "font-size": Math.max(3, cell*0.5), "font-family":"Georgia, serif", "font-weight":"700",
+          fill: stoneAtPt ? color : "var(--shu)"
+        });
+        if(!stoneAtPt){ lab.setAttribute('stroke','var(--wood)'); lab.setAttribute('stroke-width', Math.max(0.8, cell*0.12)); lab.setAttribute('paint-order','stroke'); }
+        lab.textContent = m.text;
+        svg.appendChild(lab);
       } else if(m.type==='number'){
         if(!stoneAtPt){
           svg.appendChild(el("circle",{cx,cy,r:cell*0.32, fill:"none", stroke:"var(--shu)", "stroke-width":1}));
@@ -780,6 +928,7 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers, 
 function collectAllTreePoints(node, pts){
   pts = pts || [];
   if(node.x!==null) pts.push({x:node.x,y:node.y});
+  (node.marks||[]).forEach(m=>pts.push({x:m.x,y:m.y}));
   node.children.forEach(c=>collectAllTreePoints(c,pts));
   return pts;
 }
@@ -898,14 +1047,7 @@ function importSGF(text){
   const setup = [];
   (root.AB||[]).forEach(v=>{ const p=sgfXY(v); if(p) setup.push({x:p.x,y:p.y,color:'B'}); });
   (root.AW||[]).forEach(v=>{ const p=sgfXY(v); if(p) setup.push({x:p.x,y:p.y,color:'W'}); });
-  const marks = [];
-  (root.TR||[]).forEach(v=>{ const p=sgfXY(v); if(p) marks.push({x:p.x,y:p.y,type:'triangle'}); });
-  (root.SQ||[]).forEach(v=>{ const p=sgfXY(v); if(p) marks.push({x:p.x,y:p.y,type:'square'}); });
-  (root.LB||[]).forEach(v=>{
-    const [coord, text] = v.split(':');
-    const p = sgfXY(coord);
-    if(p && /^\d+$/.test(text||'')) marks.push({x:p.x,y:p.y,type:'number', value:parseInt(text,10)});
-  });
+  const marks = marksFromProps(root, size);
   const paths = collectPaths(tree);
   let name = (root.GN && root.GN[0]) || '';
   let comment = (root.C && root.C[0]) || '';
@@ -922,12 +1064,7 @@ function exportSGF(card){
   const aw = card.setup.filter(p=>p.color==='W').map(p=>`[${String.fromCharCode(97+p.x)}${String.fromCharCode(97+p.y)}]`).join('');
   if(ab) s += `AB${ab}`;
   if(aw) s += `AW${aw}`;
-  const tr = (card.marks||[]).filter(m=>m.type==='triangle').map(m=>`[${String.fromCharCode(97+m.x)}${String.fromCharCode(97+m.y)}]`).join('');
-  const sq = (card.marks||[]).filter(m=>m.type==='square').map(m=>`[${String.fromCharCode(97+m.x)}${String.fromCharCode(97+m.y)}]`).join('');
-  if(tr) s += `TR${tr}`;
-  if(sq) s += `SQ${sq}`;
-  const lb = (card.marks||[]).filter(m=>m.type==='number').map(m=>`[${String.fromCharCode(97+m.x)}${String.fromCharCode(97+m.y)}:${m.value}]`).join('');
-  if(lb) s += `LB${lb}`;
+  s += marksToSGF(card.marks);
   s += treeToSGFBody(card.tree);
   s += ')';
   return s;
@@ -1295,7 +1432,7 @@ async function init(){
 // Los ítems con ":" son acciones del submenú (no vistas): nuevo / importar.
 const SECTIONS = {
   tsumego:  {views:[['review','Repasar'],['free','Libre'],['list','Tarjetas'],['create','Crear']]},
-  games:    {views:[['games','Mis partidas'],['games:new','Nueva'],['games:import','Importar']]},
+  games:    {views:[['games','Mis partidas'],['games:new','Nueva']]},
   joseki:   {views:[['joseki-lib','Biblioteca'],['joseki-play','Practicar']]},
   settings: {views:[]},
 };
@@ -1412,6 +1549,8 @@ function tfPoint(t, n, x, y){
 function tfColor(t, c){ return t.swap ? (c==='B'?'W':c==='W'?'B':c) : c; }
 function tfTree(node, t, n){
   const c = Object.assign({}, node);
+  c._src = node._src || node;
+  if(node.marks) c.marks = node.marks.map(m=>{ const [x,y]=tfPoint(t,n,m.x,m.y); return Object.assign({}, m, {x,y}); });
   if(node.x!==undefined){ const [x,y] = tfPoint(t,n,node.x,node.y); c.x=x; c.y=y; }
   if(node.color) c.color = tfColor(t, node.color);
   c.children = node.children.map(ch=>tfTree(ch,t,n));
@@ -1552,15 +1691,7 @@ function render(){
 function renderCreate(root){
   const st = State.create;
 
-  if(State.toast){
-    const isWarn = State.toast.type==='warn';
-    const toast = document.createElement('div');
-    toast.style.cssText = isWarn
-      ? 'background:var(--shu-soft); color:var(--shu); border:1px solid var(--shu); border-radius:3px; padding:8px 10px; font-size:13px; margin-bottom:12px;'
-      : 'background:var(--pine-soft); color:var(--pine); border:1px solid var(--pine); border-radius:3px; padding:8px 10px; font-size:13px; margin-bottom:12px;';
-    toast.textContent = State.toast.msg;
-    root.appendChild(toast);
-  }
+  appendToast(root);
 
   const h = document.createElement('h2'); h.className='section-title';
   h.textContent = st.id ? 'Editar tarjeta' : 'Crear tarjeta';
@@ -1594,20 +1725,7 @@ function renderCreate(root){
   }
 
   // sub-toggle: forma de marca (modo marcas)
-  if(st.mode==='marks'){
-    const shapeField = document.createElement('div'); shapeField.className='field';
-    shapeField.innerHTML = '<label>Tipo de marca</label>';
-    const shapeToggle = document.createElement('div'); shapeToggle.className='toggle-group';
-    [['triangle','Triángulo'],['square','Cuadrado'],['number','Número']].forEach(([key,label])=>{
-      const b = document.createElement('button');
-      b.textContent = label;
-      if(st.markShape===key) b.classList.add('active');
-      b.addEventListener('click', ()=>{ st.markShape=key; render(); });
-      shapeToggle.appendChild(b);
-    });
-    shapeField.appendChild(shapeToggle);
-    root.appendChild(shapeField);
-  }
+  if(st.mode==='marks') root.appendChild(markShapeField(st));
 
   const cursor = st.path[st.path.length-1];
 
@@ -1616,7 +1734,7 @@ function renderCreate(root){
   let statusText = '';
   if(st.mode==='setup') statusText = st.setupColor==='alt' ? 'Alternando negro/blanco.' : (st.setupColor==='B'?'Colocando negras.':'Colocando blancas.');
   else if(st.mode==='tree') statusText = `Nivel ${st.path.length-1}${cursor.children.length ? ` · ${cursor.children.length} rama(s) aquí` : ''}`;
-  else if(st.mode==='marks') statusText = st.markShape==='number' ? 'Numerando piedras.' : `Marcando con ${st.markShape==='triangle'?'triángulo':'cuadrado'}.`;
+  else if(st.mode==='marks') statusText = st.markShape==='number' ? 'Numerando piedras.' : `Marcando: ${(MARK_SHAPES.find(m=>m[0]===st.markShape)||[,''])[1].toLowerCase()}.`;
   status.innerHTML = `<span>${statusText}</span>`;
   root.appendChild(status);
 
@@ -1630,30 +1748,7 @@ function renderCreate(root){
     turnRow.appendChild(turnLabel);
     root.appendChild(turnRow);
 
-    // migas de pan: las últimas 10 jugadas de la rama; « › » muestra u oculta el resto
-    if(st.path.length>1){
-      const crumbRow = document.createElement('div'); crumbRow.style.cssText='display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px;';
-      const total = st.path.length-1, KEEP = 10;
-      const hidden = total>KEEP;
-      if(hidden){
-        const arrow = document.createElement('button'); arrow.className='btn ghost small';
-        arrow.style.cssText = 'padding:4px 8px; font-size:11.5px;';
-        arrow.textContent = st.crumbsAll ? '›' : '‹';
-        arrow.title = st.crumbsAll ? 'Ocultar jugadas anteriores' : `Mostrar las ${total-KEEP} jugadas anteriores`;
-        arrow.addEventListener('click', ()=>{ st.crumbsAll = !st.crumbsAll; render(); });
-        crumbRow.appendChild(arrow);
-      }
-      st.path.forEach((node,i)=>{
-        if(i===0) return;
-        if(hidden && !st.crumbsAll && i<=total-KEEP) return;
-        const chip = document.createElement('button'); chip.className='btn ghost small';
-        chip.style.cssText = 'padding:4px 8px; font-size:11.5px;' + (i===st.path.length-1 ? ' border-color:var(--pine); color:var(--pine);' : '');
-        chip.textContent = `${i}.${node.color==='B'?'N':'B'}${coordLabel(node.x,node.y,st.boardSize)}`;
-        chip.addEventListener('click', ()=>{ st.path = st.path.slice(0,i); render(); });
-        crumbRow.appendChild(chip);
-      });
-      root.appendChild(crumbRow);
-    }
+    const crumbs = moveCrumbs(st, st.boardSize); if(crumbs) root.appendChild(crumbs);
   }
 
   // tablero
@@ -1800,18 +1895,7 @@ function renderCreate(root){
   noteField.appendChild(noteInput);
   panels.datos.appendChild(noteField);
 
-  const folderField = document.createElement('div'); folderField.className='field';
-  folderField.innerHTML = '<label>Carpeta (opcional)</label>';
-  const folderInput = document.createElement('input'); folderInput.type='text'; folderInput.value=st.folder||'';
-  folderInput.placeholder='p. ej. Joseki, Vida y muerte';
-  folderInput.setAttribute('list','folder-suggestions');
-  folderInput.addEventListener('input', e=>{ st.folder = e.target.value; });
-  folderField.appendChild(folderInput);
-  const datalist = document.createElement('datalist'); datalist.id='folder-suggestions';
-  const existingFolders = Array.from(new Set(State.cards.map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
-  existingFolders.forEach(f=>{ const opt=document.createElement('option'); opt.value=f; datalist.appendChild(opt); });
-  folderField.appendChild(datalist);
-  panels.datos.appendChild(folderField);
+  panels.datos.appendChild(folderInputField(st.folder||'', v=>{ st.folder = v; }, State.cards.map(c=>c.folder), 'folder-suggestions'));
 
 
   const sizeField = document.createElement('div'); sizeField.className='field'; 
@@ -1989,22 +2073,7 @@ function handleCreateClick(x,y){
     else color = st.setupColor;
     st.setup.push({x,y,color});
   } else if(st.mode==='marks'){
-    const idx = st.marks.findIndex(m=>m.x===x&&m.y===y);
-    if(st.markShape==='number'){
-      if(idx===-1){
-        const nextNum = st.marks.filter(m=>m.type==='number').length + 1;
-        st.marks.push({x,y,type:'number', value:nextNum});
-      } else if(st.marks[idx].type==='number'){
-        st.marks.splice(idx,1);
-      } else {
-        const nextNum = st.marks.filter(m=>m.type==='number').length + 1;
-        st.marks[idx] = {x,y,type:'number', value:nextNum};
-      }
-    } else {
-      if(idx===-1) st.marks.push({x,y,type:st.markShape});
-      else if(st.marks[idx].type!==st.markShape) st.marks[idx].type = st.markShape;
-      else st.marks.splice(idx,1);
-    }
+    toggleMarkIn(st.marks, x, y, st.markShape);
   } else if(st.mode==='tree'){
     const cursor = st.path[st.path.length-1];
     // ¿ya existe una rama con esta jugada? navega a ella en vez de duplicar.
@@ -2190,18 +2259,14 @@ function renderImportPicker(root, st){
 
 /* ----------------------- Repasar ----------------------- */
 function renderReview(root){
+  const titlebar = document.createElement('div'); titlebar.className='titlebar';
   const h = document.createElement('h2'); h.className='section-title'; h.textContent = State.freeMode ? 'Resolución libre' : 'Repasar';
-  root.appendChild(h);
+  titlebar.appendChild(h);
+  root.appendChild(titlebar);
+  const filtersBox = document.createElement('div');
+  if(!State.freeMode) root.appendChild(filtersBox);
 
-  if(State.toast){
-    const isWarn = State.toast.type==='warn';
-    const toast = document.createElement('div');
-    toast.style.cssText = isWarn
-      ? 'background:var(--shu-soft); color:var(--shu); border:1px solid var(--shu); border-radius:3px; padding:8px 10px; font-size:13px; margin-bottom:12px;'
-      : 'background:var(--pine-soft); color:var(--pine); border:1px solid var(--pine); border-radius:3px; padding:8px 10px; font-size:13px; margin-bottom:12px;';
-    toast.textContent = State.toast.msg;
-    root.appendChild(toast);
-  }
+  appendToast(root);
 
   if(State.freeMode){
     const of = document.createElement('div'); of.className='field';
@@ -2214,7 +2279,7 @@ function renderReview(root){
       await storeSet('prefs', State.prefs);
       await buildReviewQueue(); render();
     });
-    of.appendChild(os); root.appendChild(of);
+    of.appendChild(os); filtersBox.appendChild(of);
   }
   const folderNames = Array.from(new Set((State.cards||[]).map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
   const hasNoFolderCards = (State.cards||[]).some(c=>!c.folder);
@@ -2237,7 +2302,7 @@ function renderReview(root){
       render();
     });
     filterField.appendChild(sel);
-    root.appendChild(filterField);
+    filtersBox.appendChild(filterField);
   }
 
   const card = State.reviewQueue[State.reviewIdx];
@@ -2252,6 +2317,7 @@ function renderReview(root){
         empty.appendChild(again);
       }
       root.appendChild(empty);
+      root.appendChild(filtersBox);
       return;
     }
     empty.innerHTML = State.reviewQueueTotal>0
@@ -2261,6 +2327,7 @@ function renderReview(root){
     return;
   }
 
+  titlebar.appendChild(flagBtn(card));
   const uColor = userColorFor(card);
   const p = document.createElement('p'); p.className='hint';
   const limitNote = State.reviewQueueTotal>State.reviewQueue.length ? ` (límite diario · quedan ${State.reviewQueueTotal-State.reviewQueue.length} para otro día)` : '';
@@ -2277,10 +2344,11 @@ if(step.msg) msgHtml = `<span class="msg ${step.msgType}">${step.msg}</span>`;
 else if(step.status==='exploring') msgHtml = 'Explorando libremente — estas jugadas no se califican.';
 else msgHtml = '';
 
-if (msgHtml) {
+{ // siempre se reserva el espacio del mensaje para que el tablero no se desplace al aparecer/desaparecer
   const status = document.createElement('div');
   status.className = 'status-line';
-  status.innerHTML = msgHtml;
+  status.style.minHeight = '36px';
+  status.innerHTML = msgHtml || '&nbsp;';
   root.appendChild(status);
 }
 
@@ -2304,29 +2372,31 @@ if (msgHtml) {
   const showCoords = !!(State.prefs && State.prefs.showCoords);
   renderBoard(boardWrap, card.boardSize, step.placed, interactive ? (x,y)=>handleReviewPoint(x,y) : null, step.markers, card.marks, step.numbers, crop, showCoords);
 
-  // confirmar jugada + editar tarjeta, juntos debajo del tablero
-  const confirmRow = document.createElement('div'); confirmRow.className='btnrow';
-  if(isUserTurn){
-    const confirmBtn = document.createElement('button'); confirmBtn.className='btn pine small';
-    confirmBtn.textContent = 'Confirmar jugada';
-    confirmBtn.disabled = !step.pending;
-    confirmBtn.addEventListener('click', confirmReviewMove);
-    confirmRow.appendChild(confirmBtn);
-    if(step.pending){
-      const cancelBtn = document.createElement('button'); cancelBtn.className='btn ghost small'; cancelBtn.textContent='Deshacer selección';
-      cancelBtn.addEventListener('click', ()=>{ step.pending=null; step.markers.clear(); render(); });
-      confirmRow.appendChild(cancelBtn);
-    }
+  // botones bajo el tablero
+  const finished = step.status==='finished';
+  const mk = (txt, cls, fn, dis)=>{ const bt = document.createElement('button'); bt.className='btn small '+cls; bt.textContent=txt; bt.disabled=!!dis; if(fn) bt.addEventListener('click', fn); return bt; };
+  const row = document.createElement('div'); row.className='btnrow fill';
+  if(finished){
+    row.appendChild(mk('Siguiente tarjeta','pine', ()=>advanceReviewQueue(), false));
+  } else {
+    const cf = mk('Confirmar jugada','pine', confirmReviewMove, !(isUserTurn && step.pending)); cf.dataset.keep='1';
+    row.appendChild(cf);
+    if(step.status!=='exploring') row.appendChild(mk('Mostrar línea','ghost', revealReviewAnswer, !(step.status==='guessing' && isUserTurn && !step.pending)));
   }
-  const editCardBtn = document.createElement('button'); editCardBtn.className='btn ghost small';
-  editCardBtn.textContent = '✎ Editar esta tarjeta';
-  editCardBtn.addEventListener('click', ()=>{
-    State.returnToReview = true;
-    editCard(card._orig || card);
-    switchView('create');
-  });
-  if(step.status!=='finished') confirmRow.appendChild(editCardBtn); // al terminar, "Editar" va en su propia fila
-  root.appendChild(confirmRow);
+  // editar solo después de ver la línea o de intentar responder
+  if(finished || step.revealed || step.moveCount>0 || step.mistakes>0){
+    const editFn = finished
+      ? async ()=>{
+          await commitReview();                 // guarda el resultado antes de salir
+          State.cards = await storeListCards(); await updateDueBadge();
+          State.returnToReview = true;
+          editCard(State.cards.find(c=>c.id===card.id) || card);
+          switchView('create');
+        }
+      : ()=>{ State.returnToReview = true; editCard(card._orig || card); switchView('create'); };
+    row.appendChild(mk('✎ Editar','ghost', editFn, false));
+  }
+  root.appendChild(row);
 
   // exploración libre
   if(step.status==='exploring'){
@@ -2357,34 +2427,8 @@ if (msgHtml) {
     root.appendChild(box);
   }
 
-  if(step.status==='guessing' && isUserTurn && !step.pending){
-    const revealRow = document.createElement('div'); revealRow.className='btnrow';
-    const revealBtn = document.createElement('button'); revealBtn.className='btn ghost small'; revealBtn.textContent='Mostrar línea correcta';
-    revealBtn.addEventListener('click', revealReviewAnswer);
-    revealRow.appendChild(revealBtn);
-    root.appendChild(revealRow);
-  }
-
   if(step.status==='finished'){
     if(!step.viewPath) step.viewPath = findNodePath(card.tree, step.cursor) || [card.tree];
-
-    const nextRow = document.createElement('div'); nextRow.className='btnrow';
-    const nextBtn = document.createElement('button'); nextBtn.className='btn pine'; nextBtn.textContent='Siguiente tarjeta';
-    nextBtn.addEventListener('click', ()=>advanceReviewQueue());
-    nextRow.appendChild(nextBtn);
-    root.appendChild(nextRow);
-
-    const actRow = document.createElement('div'); actRow.className='btnrow';
-    const editBtn = document.createElement('button'); editBtn.className='btn ghost small'; editBtn.textContent='Editar';
-    editBtn.addEventListener('click', async ()=>{
-      await commitReview();                 // guarda el resultado antes de salir
-      State.cards = await storeListCards(); await updateDueBadge();
-      State.returnToReview = true;
-      editCard(State.cards.find(c=>c.id===card.id) || card);
-      switchView('create');
-    });
-    actRow.appendChild(editBtn); actRow.appendChild(flagBtn(card));
-    root.appendChild(actRow);
 
     const resultBox = document.createElement('div'); resultBox.className='lines-box';
     if(!State.freeMode){ resultBox.innerHTML = `<div style="font-size:13.5px;">${describeNextReview(step.previewSchedule)}</div>`; root.appendChild(resultBox); }
@@ -2392,10 +2436,27 @@ if (msgHtml) {
     const treeBox = document.createElement('div'); treeBox.className='lines-box tree-scroll';
     renderTreeGraph(treeBox, card.tree, card.boardSize, step.viewPath, showReviewPath);
     root.appendChild(treeBox);
-  } else {
-    const flagRow = document.createElement('div'); flagRow.className='btnrow';
-    flagRow.appendChild(flagBtn(card));
-    root.appendChild(flagRow);
+  }
+
+  if(State.freeMode){
+    // navegación entre problemas + orden y carpeta, debajo del tablero
+    const go = async (i)=>{ State.reviewIdx = Math.max(0, Math.min(State.reviewQueue.length-1, i)); startReviewStep(); render(); };
+    const nav = document.createElement('div'); nav.className='btnrow fill';
+    const prev = document.createElement('button'); prev.className='btn ghost small'; prev.textContent='‹ Anterior'; prev.disabled = State.reviewIdx<=0;
+    prev.addEventListener('click', ()=>go(State.reviewIdx-1));
+    const next = document.createElement('button'); next.className='btn ghost small'; next.textContent='Siguiente ›'; next.disabled = State.reviewIdx>=State.reviewQueue.length-1;
+    next.addEventListener('click', ()=>go(State.reviewIdx+1));
+    nav.appendChild(prev); nav.appendChild(next);
+    filtersBox.insertBefore(nav, filtersBox.firstChild);
+    const jf = document.createElement('div'); jf.className='field';
+    jf.innerHTML = '<label>Ir a</label>';
+    const js = document.createElement('select');
+    State.reviewQueue.forEach((c,i)=>{ const o=document.createElement('option'); o.value=i; o.textContent = (i+1)+'. '+(c.title||'(sin título)'); js.appendChild(o); });
+    js.value = State.reviewIdx;
+    js.addEventListener('change', ()=>go(parseInt(js.value,10)));
+    jf.appendChild(js);
+    filtersBox.insertBefore(jf, nav.nextSibling);
+    root.appendChild(filtersBox);
   }
 }
 
@@ -2405,13 +2466,13 @@ async function toggleFlag(card){
   await storeSet('card:'+card.id, card._orig || card);
   render();
 }
-function flagBtn(card, small){
-  const b = document.createElement('button');
-  b.className = 'btn small ' + (card.flag ? 'on' : 'ghost');
-  b.textContent = card.flag ? '★ Marcada' : '☆ Marcar';
-  b.addEventListener('click', ()=>toggleFlag(card));
+function starBtn(on, fn){
+  const b = document.createElement('button'); b.className = 'star' + (on ? ' on' : '');
+  b.textContent = on ? '★' : '☆'; b.title = on ? 'Marcada' : 'Marcar';
+  b.addEventListener('click', e=>{ e.stopPropagation(); fn(); });
   return b;
 }
+function flagBtn(card){ return starBtn(!!card.flag, ()=>toggleFlag(card)); }
 function findNodePath(root, target){
   if(root===target) return [root];
   for(const c of root.children){ const r = findNodePath(c, target); if(r) return [root].concat(r); }
@@ -2461,6 +2522,40 @@ function handleReviewPoint(x,y){
   }
 }
 
+/** Si la posición actual es simétrica (espejo/giro), una jugada equivalente por simetría también vale:
+ *  la tarjeta se reorienta para que esa jugada coincida con la rama correspondiente. */
+function reviewSymmetricMatch(step, x, y){
+  const card = State.reviewQueue[State.reviewIdx];
+  const n = card.boardSize;
+  for(let m=0;m<2;m++) for(let r=0;r<4;r++){
+    if(!m && !r) continue;
+    const g = {r, m:!!m, swap:false};
+    let inv = true;
+    for(const [k,col] of step.placed){
+      const [sx,sy] = k.split(',').map(Number);
+      const [gx,gy] = tfPoint(g,n,sx,sy);
+      if(step.placed.get(gx+','+gy)!==col){ inv=false; break; }
+    }
+    if(!inv) continue;
+    if(!step.cursor.children.some(c=>{ const [gx,gy]=tfPoint(g,n,c.x,c.y); return gx===x && gy===y; })) continue;
+    const oldPath = findNodePath(card.tree, step.cursor);
+    if(!oldPath) continue;
+    const nc = tfCard(card, g); nc._orig = card._orig || card;
+    let node = nc.tree;
+    for(let i=1;i<oldPath.length;i++){
+      const [gx,gy] = tfPoint(g,n,oldPath[i].x,oldPath[i].y);
+      node = node.children.find(c=>c.x===gx && c.y===gy);
+      if(!node){ node = null; break; }
+    }
+    if(!node) continue;
+    const hit = node.children.find(c=>c.x===x && c.y===y);
+    if(!hit) continue;
+    State.reviewQueue[State.reviewIdx] = nc;
+    step.cursor = node; step.viewPath = null;
+    return hit;
+  }
+  return null;
+}
 async function confirmReviewMove(){
   const step = State.reviewStep;
   const card = State.reviewQueue[State.reviewIdx];
@@ -2469,7 +2564,8 @@ async function confirmReviewMove(){
   const color = nextMoveColor(card, step.moveCount);
   const moveNumber = step.moveCount+1;
   const wasFollowingWrong = step.status==='following-wrong';
-  const match = step.cursor.children.find(c=>c.x===x && c.y===y);
+  let match = step.cursor.children.find(c=>c.x===x && c.y===y);
+  if(!match) match = reviewSymmetricMatch(step, x, y);
 
   // coloca la piedra primero, luego (con una breve pausa) muestra el feedback
   recordReviewMove(step, card.boardSize, x, y, color, moveNumber);
@@ -2704,19 +2800,20 @@ function renderCardItem(root, card){
   if(card.tree.children[0]) stones.set(card.tree.children[0].x+','+card.tree.children[0].y, card.tree.children[0].color);
   renderBoard(mini, card.boardSize, stones, null, null);
   item.appendChild(mini);
+  item.appendChild(flagBtn(card));
 
   const info = document.createElement('div'); info.className='info';
   const variantNote = counts.correct>1 ? ` · ${counts.correct} variantes` : '';
   const statusNote = isDraft
     ? '<span class="tag" style="background:var(--paper-deep); color:var(--ink-soft);">borrador</span> falta la línea correcta'
     : `${firstPath ? firstPath.length : 0} jugadas${variantNote} · vence ${fmtDate(card.srs.due)}${card.srs.due<=todayISO() ? ' · pendiente':''}`;
-  info.innerHTML = `<div class="note">${card.flag ? '★ ' : ''}${esc(card.title) || '(sin título)'}</div>
+  info.innerHTML = `<div class="note">${esc(card.title) || '(sin título)'}</div>
     <div class="meta">${card.boardSize}×${card.boardSize} · ${statusNote}</div>`
     + (card.note ? `<div class="meta" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(card.note)}</div>` : '');
   item.appendChild(info);
 
   const actions = document.createElement('div'); actions.className='actions';
-  const editBtn = document.createElement('button'); editBtn.className='btn ghost small'; editBtn.textContent='Editar';
+  const editBtn = document.createElement('button'); editBtn.className='btn pine small'; editBtn.textContent='Editar';
   editBtn.addEventListener('click', ()=>{ editCard(card); switchView('create'); });
   const delBtn = document.createElement('button'); delBtn.className='btn ghost small'; delBtn.textContent='Eliminar';
   delBtn.addEventListener('click', async ()=>{
@@ -2730,7 +2827,7 @@ function renderCardItem(root, card){
   sgfBtn.addEventListener('click', ()=>{
     downloadText((card.title||'tarjeta').replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', exportSGF(card));
   });
-  actions.appendChild(flagBtn(card)); actions.appendChild(editBtn); actions.appendChild(sgfBtn); actions.appendChild(delBtn);
+  actions.appendChild(editBtn); actions.appendChild(sgfBtn); actions.appendChild(delBtn);
   item.appendChild(actions);
 
   root.appendChild(item);
@@ -2779,13 +2876,26 @@ async function goNeighborCard(dir){
 // Cada nodo puede llevar: comment (texto), loss (puntos que pierde esa jugada frente a la mejor)
 // y tenuki:{loss, comment} (evaluación de ignorar la posición). En SGF: C[], LOSS[], TENUKI[], TENUKIC[].
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+/** Campo «Carpeta» con sugerencias; el mismo en tarjetas y partidas. */
+function folderInputField(value, onInput, names, listId){
+  const f = document.createElement('div'); f.className='field';
+  f.innerHTML = '<label>Carpeta (opcional)</label>';
+  const inp = document.createElement('input'); inp.type='text'; inp.value = value;
+  inp.placeholder='p. ej. Joseki, Vida y muerte';
+  inp.setAttribute('list', listId);
+  inp.addEventListener('input', e=>onInput(e.target.value));
+  f.appendChild(inp);
+  const dl = document.createElement('datalist'); dl.id = listId;
+  Array.from(new Set((names||[]).filter(Boolean))).sort(naturalCompare).forEach(n=>{ const o=document.createElement('option'); o.value=n; dl.appendChild(o); });
+  f.appendChild(dl);
+  return f;
+}
 function appendToast(root){
   if(!State.toast) return;
   const isWarn = State.toast.type==='warn';
   const toast = document.createElement('div');
-  toast.style.cssText = isWarn
-    ? 'background:var(--shu-soft); color:var(--shu); border:1px solid var(--shu); border-radius:3px; padding:8px 10px; font-size:13px; margin-bottom:12px;'
-    : 'background:var(--pine-soft); color:var(--pine); border:1px solid var(--pine); border-radius:3px; padding:8px 10px; font-size:13px; margin-bottom:12px;';
+  // flotante: no empuja el contenido (el tablero no se mueve al aparecer)
+  toast.style.cssText = 'position:fixed; left:14px; right:14px; top:10px; z-index:60; max-width:560px; margin:0 auto; box-shadow:0 2px 8px rgba(0,0,0,.25); border-radius:3px; padding:8px 10px; font-size:13px; background:var('+(isWarn?'--shu-soft':'--pine-soft')+'); color:var('+(isWarn?'--shu':'--pine')+'); border:1px solid var('+(isWarn?'--shu':'--pine')+');';
   toast.textContent = State.toast.msg;
   root.appendChild(toast);
 }
@@ -2801,6 +2911,8 @@ function mergeTreeInto(t, src, title, depth){
     if(sc.comment && !tc.comment) tc.comment = sc.comment;
     if(sc.loss!=null && tc.loss==null) tc.loss = sc.loss;
     if(sc.tenuki && !tc.tenuki) tc.tenuki = JSON.parse(JSON.stringify(sc.tenuki));
+    if(sc.flag) tc.flag = true;
+    if(sc.marks){ tc.marks = tc.marks||[]; sc.marks.forEach(m=>{ if(!tc.marks.some(q=>q.x===m.x&&q.y===m.y)) tc.marks.push(m); }); }
     added += mergeTreeInto(tc, sc, title, depth+1);
   });
   return added;
@@ -2828,6 +2940,8 @@ function bookNodeProps(n){
   let o = '';
   if(n.comment) o += `C[${sgfText(n.comment)}]`;
   if(n.loss!=null && n.loss!=='') o += `LOSS[${n.loss}]`;
+  if(n.flag) o += 'FLAG[1]';
+  o += marksToSGF(n.marks);
   if(n.tenuki){
     if(n.tenuki.loss!=null && n.tenuki.loss!=='') o += `TENUKI[${n.tenuki.loss}]`;
     if(n.tenuki.comment) o += `TENUKIC[${sgfText(n.tenuki.comment)}]`;
@@ -2855,6 +2969,8 @@ function mergeSGFIntoBook(text, book){
   if((head.AB && head.AB.length) || (head.AW && head.AW.length)) return null;
   const applyProps = (node, props)=>{
     if(props.C && props.C[0] && !node.comment) node.comment = props.C[0];
+    if(props.FLAG) node.flag = true;
+    mergeMarks(node, marksFromProps(props, book.boardSize));
     if(props.LOSS){ const v = parseFloat(props.LOSS[0]); if(!isNaN(v) && node.loss==null) node.loss = v; }
     if(props.TENUKI){ const v = parseFloat(props.TENUKI[0]); if(!isNaN(v)){ node.tenuki = node.tenuki||{}; if(node.tenuki.loss==null) node.tenuki.loss = v; } }
     if(props.TENUKIC){ node.tenuki = node.tenuki||{}; if(!node.tenuki.comment) node.tenuki.comment = props.TENUKIC[0]; }
@@ -2916,17 +3032,17 @@ function bookStep(d){
   else { const c = bk.path[bk.path.length-1]; if(c.children.length) bk.path = bk.path.concat([c.children[0]]); }
   render();
 }
-function bookClick(x,y){
-  const book = State.book, bk = State.bk;
-  const cursor = bk.path[bk.path.length-1];
+/** Jugar o navegar en un árbol de jugadas (biblioteca y partidas): comparten reglas, marcas y legalidad. */
+function treeClick(h, x, y, o){
+  const cursor = h.path[h.path.length-1];
+  if(h.mode==='marks'){ toggleNodeMark(cursor, x, y, h.markShape||'triangle'); o.onChange(); render(); return; }
   const existing = cursor.children.find(c=>c.x===x && c.y===y);
-  if(existing){ bk.path = bk.path.concat([existing]); render(); return; }
-  if(!bk.edit) return;
-  const moves = pathToMoves(bk.path);
-  const stones = buildLineDisplay(book.boardSize, [], moves).stones;
-  const color = bookTurn(book, bk.path);
-  const koKey = moves.length>=1 ? boardKey(buildLineDisplay(book.boardSize, [], moves.slice(0,-1)).stones) : null;
-  const check = checkMoveLegality(stones, book.boardSize, x, y, color, koKey);
+  if(existing){ h.path = h.path.concat([existing]); render(); return; }
+  const moves = pathToMoves(h.path);
+  const stones = buildLineDisplay(o.size, o.setup, moves).stones;
+  const color = o.color();
+  const koKey = moves.length>=1 ? boardKey(buildLineDisplay(o.size, o.setup, moves.slice(0,-1)).stones) : null;
+  const check = checkMoveLegality(stones, o.size, x, y, color, koKey);
   if(!check.legal){
     if(check.reason==='occupied') return;
     showToast(check.reason==='ko' ? 'Jugada ilegal: ko.' : 'Jugada ilegal: suicidio.', 'warn');
@@ -2934,9 +3050,39 @@ function bookClick(x,y){
   }
   const node = newTreeNode(x,y,color);
   cursor.children.push(node);
-  bk.path = bk.path.concat([node]);
-  saveBook();
+  h.path = h.path.concat([node]);
+  o.onChange();
   render();
+}
+/** Barra « ‹ › » y botón de eliminar jugada/rama, iguales en biblioteca y partidas. */
+function treeNavRow(h, rootNode){
+  const cur = h.path[h.path.length-1], total = h.path.length-1;
+  const nav = document.createElement('div'); nav.className='btnrow';
+  [['«','Inicio',()=>{ h.path=[rootNode]; render(); }, total===0],
+   ['‹','Anterior',()=>{ if(h.path.length>1) h.path = h.path.slice(0,-1); render(); }, total===0],
+   ['›','Siguiente',()=>{ if(cur.children.length) h.path = h.path.concat([cur.children[0]]); render(); }, !cur.children.length],
+   ['»','Final',()=>{ let p=h.path.slice(); let c=p[p.length-1]; while(c.children.length){ c=c.children[0]; p.push(c); } h.path=p; render(); }, !cur.children.length]
+  ].forEach(([label,title,fn,dis])=>{
+    const b = document.createElement('button'); b.className='btn ghost'; b.style.flex='1'; b.textContent=label; b.title=title; b.disabled=dis;
+    b.addEventListener('click', fn); nav.appendChild(b);
+  });
+  return nav;
+}
+function deleteMoveButton(h, onChange){
+  const cur = h.path[h.path.length-1];
+  const b = document.createElement('button'); b.className='btn ghost small';
+  b.textContent = cur.children.length ? 'Eliminar rama' : 'Eliminar jugada'; b.disabled = h.path.length<2;
+  b.addEventListener('click', ()=>{
+    if(cur.children.length && !confirm('Esta rama tiene jugadas después. ¿Eliminar todo?')) return;
+    const parent = h.path[h.path.length-2];
+    parent.children = parent.children.filter(c=>c!==cur);
+    h.path = h.path.slice(0,-1); onChange(); render();
+  });
+  return b;
+}
+function bookClick(x,y){
+  const book = State.book, bk = State.bk;
+  treeClick(bk, x, y, {size:book.boardSize, setup:[], color:()=>bookTurn(book,bk.path), onChange:saveBook});
 }
 document.addEventListener('keydown', e=>{
   if(State.view!=='joseki-lib' || !State.bk) return;
@@ -2961,6 +3107,15 @@ function numField(label, getVal, setVal, onDone){
   f.appendChild(i);
   return f;
 }
+/** Pérdida de puntos (campo mínimo) + comentario que ocupa el resto. */
+function lossComment(getLoss, setLoss, getC, setC, ph){
+  const r = document.createElement('div'); r.className='lossrow';
+  const nf = numField('Pts', getLoss, setLoss, null); nf.className='field loss'; nf.style.flex='none'; nf.querySelector('input').placeholder='';
+  nf.querySelector('input').maxLength = 4;
+  const tf = textField('Comentario', getC, setC, ph); tf.classList.add('cmt');
+  r.appendChild(nf); r.appendChild(tf);
+  return r;
+}
 function textField(label, getVal, setVal, ph){
   const f = document.createElement('div'); f.className='field';
   f.innerHTML = `<label>${label}</label>`;
@@ -2974,7 +3129,7 @@ function textField(label, getVal, setVal, ph){
 // --- editor / visor de la biblioteca ---
 function bkState(){
   const b = State.book;
-  if(!State.bk || State.bk.tree!==b.tree) State.bk = {tree:b.tree, path:[b.tree], edit:!b.tree.children.length};
+  if(!State.bk || State.bk.tree!==b.tree) State.bk = {tree:b.tree, path:[b.tree], edit:true};
   return State.bk;
 }
 function renderBook(root){
@@ -2984,8 +3139,13 @@ function renderBook(root){
   const stones = bookStones(book, bk.path);
   const turn = bookTurn(book, bk.path);
   const status = document.createElement('div'); status.className='status-line';
-  status.innerHTML = `<span>Jugada ${total} · ${turn==='B'?'Negro':'Blanco'} a jugar${bk.edit ? ' · editando' : ''}</span>`;
+  status.innerHTML = `<span>Jugada ${total} · ${turn==='B'?'Negro':'Blanco'} a jugar</span>`;
+  if(total>0){
+    const last0 = bk.path[bk.path.length-1];
+    status.appendChild(starBtn(!!last0.flag, ()=>{ if(last0.flag) delete last0.flag; else last0.flag = true; saveBook(); render(); }));
+  }
   root.appendChild(status);
+  { const cr = moveCrumbs(bk, book.boardSize); if(cr) root.appendChild(cr); }
 
   const boardWrap = document.createElement('div'); boardWrap.className='board-wrap';
   root.appendChild(boardWrap);
@@ -2995,55 +3155,19 @@ function renderBook(root){
   });
   const crop = (!State.prefs || State.prefs.autoCrop!==false) ? computeCropBounds(book.boardSize, [], book.tree, []) : null;
   const showCoords = !!(State.prefs && State.prefs.showCoords);
-  renderBoard(boardWrap, book.boardSize, stones, (x,y)=>bookClick(x,y), markers, null, null, crop, showCoords);
+  renderBoard(boardWrap, book.boardSize, stones, (x,y)=>bookClick(x,y), markers, cur.marks||null, null, crop, showCoords);
 
-  const nav = document.createElement('div'); nav.className='btnrow';
-  [['«','Inicio',()=>{ bk.path=[book.tree]; render(); }, total===0],
-   ['‹','Anterior',()=>bookStep(-1), total===0],
-   ['›','Siguiente (A)',()=>bookStep(1), !cur.children.length],
-   ['»','Final',()=>{ let p=bk.path.slice(); let c=p[p.length-1]; while(c.children.length){ c=c.children[0]; p.push(c); } bk.path=p; render(); }, !cur.children.length]
-  ].forEach(([label,title,fn,dis])=>{
-    const b = document.createElement('button'); b.className='btn ghost'; b.style.flex='1'; b.textContent=label; b.title=title; b.disabled=dis;
-    b.addEventListener('click', fn); nav.appendChild(b);
-  });
-  root.appendChild(nav);
+  root.appendChild(treeNavRow(bk, book.tree));
+  root.appendChild(markToolbar(bk));
 
-  // opciones desde esta posición: A, B, C… y tenuki
-  const box = document.createElement('div'); box.className='lines-box';
-  const ttl = document.createElement('div'); ttl.style.cssText='font-size:12.5px; color:var(--ink-soft); margin-bottom:4px;';
-  ttl.textContent = (cur.children.length||cur.tenuki) ? 'Opciones desde aquí' : 'Sin jugadas desde aquí';
-  box.appendChild(ttl);
-  cur.children.forEach((c,i)=>{
-    const row = document.createElement('div'); row.className='line-item'; row.style.cursor='pointer';
-    row.innerHTML = `<span><strong>${LETTERS[i]||'?'}</strong> · ${coordLabel(c.x,c.y,book.boardSize)}</span><span style="color:var(--ink-soft); font-size:12.5px;">${esc(fmtLoss(c.loss))}</span>`;
-    row.addEventListener('click', ()=>{ bk.path = bk.path.concat([c]); render(); });
-    box.appendChild(row);
-  });
-  if(cur.tenuki){
-    const row = document.createElement('div'); row.className='line-item';
-    const tl = cur.tenuki.loss;
-    row.innerHTML = `<span><strong>T</strong> · Tenuki</span><span style="color:var(--ink-soft); font-size:12.5px;">${esc(fmtLoss(tl))}</span>`;
-    box.appendChild(row);
-  }
-  root.appendChild(box);
-
-  const acts = document.createElement('div'); acts.className='btnrow';
-  const editBtn = document.createElement('button'); editBtn.className='btn small ' + (bk.edit ? 'on' : 'ghost'); editBtn.textContent = bk.edit ? '✎ Editando' : '✎ Editar';
-  editBtn.addEventListener('click', ()=>{ bk.edit = !bk.edit; render(); });
-  const delBtn = document.createElement('button'); delBtn.className='btn ghost small';
-  delBtn.textContent = cur.children.length ? 'Eliminar rama' : 'Eliminar jugada'; delBtn.disabled = total===0 || !bk.edit;
-  delBtn.addEventListener('click', ()=>{
-    if(cur.children.length && !confirm('Esta rama tiene jugadas después. ¿Eliminar todo?')) return;
-    const parent = bk.path[bk.path.length-2];
-    parent.children = parent.children.filter(c=>c!==cur);
-    bk.path = bk.path.slice(0,-1); saveBook(); render();
-  });
+  const acts = document.createElement('div'); acts.className='btnrow fill';
+  const delBtn = deleteMoveButton(bk, saveBook);
   const tenBtn = document.createElement('button'); tenBtn.className='btn small ' + (cur.tenuki ? 'on' : 'ghost'); tenBtn.textContent = cur.tenuki ? 'Quitar tenuki' : '+ Tenuki';
   tenBtn.addEventListener('click', ()=>{
     if(cur.tenuki){ delete cur.tenuki; } else { cur.tenuki = {}; }
     saveBook(); render();
   });
-  acts.appendChild(editBtn); acts.appendChild(tenBtn); acts.appendChild(delBtn);
+  acts.appendChild(tenBtn); acts.appendChild(delBtn);
   root.appendChild(acts);
 
   if(book.tree.children.length){
@@ -3052,32 +3176,24 @@ function renderBook(root){
     root.appendChild(tb);
   }
 
-
-  // esta jugada: comentario y pérdida de puntos
-  if(total>0){
-    const lbl = document.createElement('div'); lbl.style.cssText='font-size:12.5px; color:var(--ink-soft); margin:6px 0 4px;';
-    lbl.textContent = `Esta jugada (${coordLabel(cur.x,cur.y,book.boardSize)})`;
-    root.appendChild(lbl);
-    const r = document.createElement('div'); r.className='row';
-    r.appendChild(numField('Pérdida de puntos', ()=>cur.loss, v=>{ if(v==null) delete cur.loss; else cur.loss=v; }, ()=>render()));
-    root.appendChild(r);
-    root.appendChild(textField('Comentario', ()=>cur.comment, v=>{ if(v) cur.comment=v; else delete cur.comment; }, 'Por qué se juega, cuándo conviene…'));
-  } else {
-    root.appendChild(textField('Nota de la biblioteca', ()=>cur.comment, v=>{ if(v) cur.comment=v; else delete cur.comment; }, ''));
+  // esta jugada: pérdida de puntos (pequeña) + comentario — siempre visible, también en la posición inicial
+  {
+    const hd = document.createElement('div'); hd.style.cssText='display:flex; align-items:center; justify-content:space-between; margin:6px 0 4px; font-size:12.5px; color:var(--ink-soft);';
+    const lbl = document.createElement('span'); lbl.textContent = total>0 ? `Esta jugada (${coordLabel(cur.x,cur.y,book.boardSize)})` : 'Posición inicial';
+    hd.appendChild(lbl);
+    root.appendChild(hd);
+    const lc = lossComment(()=>cur.loss, v=>{ if(v==null) delete cur.loss; else cur.loss=v; },
+      ()=>cur.comment, v=>{ if(v) cur.comment=v; else delete cur.comment; }, total>0 ? 'Por qué se juega, cuándo conviene…' : 'Nota de la biblioteca');
+    if(total===0){ const inp = lc.querySelector('.loss input'); inp.disabled = true; inp.style.opacity='0.4'; }
+    root.appendChild(lc);
   }
   // tenuki en esta posición (solo si se agregó)
   if(cur.tenuki){
     const tl = document.createElement('div'); tl.style.cssText='font-size:12.5px; color:var(--ink-soft); margin:6px 0 4px;';
     tl.textContent = 'Si se hace tenuki aquí';
     root.appendChild(tl);
-    const tr = document.createElement('div'); tr.className='row';
-    tr.appendChild(numField('Pérdida de puntos', ()=>cur.tenuki.loss, v=>{
-      if(v==null) delete cur.tenuki.loss; else cur.tenuki.loss=v;
-    }, ()=>render()));
-    root.appendChild(tr);
-    root.appendChild(textField('Comentario del tenuki', ()=>cur.tenuki.comment, v=>{
-      if(v) cur.tenuki.comment=v; else delete cur.tenuki.comment;
-    }, ''));
+    root.appendChild(lossComment(()=>cur.tenuki.loss, v=>{ if(v==null) delete cur.tenuki.loss; else cur.tenuki.loss=v; },
+      ()=>cur.tenuki.comment, v=>{ if(v) cur.tenuki.comment=v; else delete cur.tenuki.comment; }, ''));
   }
 
   const io = document.createElement('div'); io.className='btnrow'; io.style.marginTop='18px';
@@ -3116,7 +3232,7 @@ function jpMachineTurn(js){
 }
 function jpNote(label, node){
   const hasLoss = node.loss!=null && node.loss!=='';
-  return {label: label + (hasLoss ? ' · pérdida '+fmtLoss(node.loss) : ''), text: node.comment||''};
+  return {loss: hasLoss ? fmtLoss(node.loss) : '', text: node.comment||''};
 }
 /** La máquina responde sola (al azar entre las ramas de su color), igual que en el repaso de tsumegos. */
 async function jpMachine(){
@@ -3224,6 +3340,10 @@ function renderBookPractice(root){
   else if(js.busy || jpMachineTurn(js)) st = 'Responde el rival…';
   else st = `Juega ${turnColor==='B'?'Negro':'Blanco'}${js.side==='both'?'':' (tú)'}`;
   status.innerHTML = `<span>${st}${js.msg ? ' · <span class="msg bad">'+esc(js.msg)+'</span>' : ''}</span>`;
+  if(total>0){
+    const last = js.path[js.path.length-1], orig = last._src || last;
+    status.appendChild(starBtn(!!orig.flag, ()=>{ if(orig.flag) delete orig.flag; else orig.flag = true; saveBook(); render(); }));
+  }
   root.appendChild(status);
 
   const boardWrap = document.createElement('div'); boardWrap.className='board-wrap';
@@ -3233,30 +3353,20 @@ function renderBookPractice(root){
   if(js.pending) markers.set(js.pending.x+','+js.pending.y, {type:'pending'});
   const crop = (!State.prefs || State.prefs.autoCrop!==false) ? computeCropBounds(book.boardSize, [], book.tree, []) : null;
   const showCoords = !!(State.prefs && State.prefs.showCoords);
-  renderBoard(boardWrap, book.boardSize, stones, userTurn && !js.busy ? (x,y)=>jpTap(x,y) : null, markers, null, null, crop, showCoords);
+  renderBoard(boardWrap, book.boardSize, stones, userTurn && !js.busy ? (x,y)=>jpTap(x,y) : null, markers, cur.marks||null, null, crop, showCoords);
 
-  // confirmar jugada · deshacer selección
-  const confirmRow = document.createElement('div'); confirmRow.className='btnrow';
-  const confirmBtn = document.createElement('button'); confirmBtn.className='btn pine small'; confirmBtn.textContent='Confirmar jugada';
+  // confirmar · tenuki · ver opciones (tocar fuera del tablero deshace la selección)
+  const optRow = document.createElement('div'); optRow.className='btnrow fill';
+  const confirmBtn = document.createElement('button'); confirmBtn.className='btn pine small'; confirmBtn.textContent='Confirmar jugada'; confirmBtn.dataset.keep='1';
   confirmBtn.disabled = !js.pending || !userTurn || js.busy;
   confirmBtn.addEventListener('click', jpConfirm);
-  confirmRow.appendChild(confirmBtn);
-  if(js.pending){
-    const cancel = document.createElement('button'); cancel.className='btn ghost small'; cancel.textContent='Deshacer selección';
-    cancel.addEventListener('click', ()=>{ js.pending=null; render(); });
-    confirmRow.appendChild(cancel);
-  }
-  root.appendChild(confirmRow);
-
-  // tenuki · ver opciones
-  const optRow = document.createElement('div'); optRow.className='btnrow';
   const tenukiBtn = document.createElement('button'); tenukiBtn.className='btn small ' + (js.panel==='tenuki' ? 'on' : 'ghost'); tenukiBtn.textContent='Tenuki';
   tenukiBtn.disabled = !userTurn || js.busy;
   tenukiBtn.addEventListener('click', ()=>{ js.pending=null; js.msg=''; js.panel = js.panel==='tenuki' ? null : 'tenuki'; render(); });
   const optBtn = document.createElement('button'); optBtn.className='btn small ' + (js.showOptions ? 'on' : 'ghost'); optBtn.textContent = js.showOptions ? 'Ocultar opciones' : 'Ver opciones';
   optBtn.disabled = !userTurn;
   optBtn.addEventListener('click', ()=>{ js.showOptions = !js.showOptions; render(); });
-  optRow.appendChild(tenukiBtn); optRow.appendChild(optBtn);
+  optRow.appendChild(confirmBtn); optRow.appendChild(tenukiBtn); optRow.appendChild(optBtn);
   root.appendChild(optRow);
 
   if(js.panel==='miss'){
@@ -3278,21 +3388,13 @@ function renderBookPractice(root){
       + (t.comment ? `<div style="font-size:13px; margin-top:6px; white-space:pre-wrap;">${esc(t.comment)}</div>` : (t.loss==null ? '<div style="font-size:12.5px; color:var(--ink-soft); margin-top:6px;">Sin evaluación registrada.</div>' : ''));
     root.appendChild(box);
   }
-  if(js.showOptions && userTurn){
-    const box = document.createElement('div'); box.className='lines-box';
-    cur.children.forEach((c,i)=>{
-      const it = document.createElement('div'); it.className='line-item';
-      it.innerHTML = `<span><strong>${LETTERS[i]||'?'}</strong> · ${coordLabel(c.x,c.y,book.boardSize)}</span><span style="color:var(--ink-soft); font-size:12.5px;">${esc(fmtLoss(c.loss))}</span>`;
-      box.appendChild(it);
-    });
-    root.appendChild(box);
-  }
   // notas de lo último que se jugó (pérdida y comentario)
   if(js.notes.length){
     const box = document.createElement('div'); box.className='lines-box';
     js.notes.forEach(n=>{
-      const d = document.createElement('div'); d.style.cssText='font-size:13px; margin-bottom:4px;';
-      d.innerHTML = `<strong>${esc(n.label)}</strong>` + (n.text ? `<div style="white-space:pre-wrap; margin-top:2px;">${esc(n.text)}</div>` : '');
+      if(!n.loss && !n.text) return;
+      const d = document.createElement('div'); d.style.cssText='font-size:13px; margin-bottom:4px; white-space:pre-wrap;';
+      d.innerHTML = (n.loss ? `<strong>${esc(n.loss)}</strong> ` : '') + esc(n.text);
       box.appendChild(d);
     });
     root.appendChild(box);
@@ -3364,20 +3466,28 @@ function openItem(g, kind){
   const tree = cloneTree(g.tree);
   State.game = {
     kind, id:g.id, title:g.title||'', boardSize:g.boardSize, setup:JSON.parse(JSON.stringify(g.setup||[])),
-    tree, path:[tree], createdAt:g.createdAt||Date.now(), firstMover: treeFirstColor(tree) || (g.info && g.info.handicap>=2 ? 'W' : 'B'),
-    edit: !g.tree.children.length, dirty:false,
+    tree, path:[tree], folder:g.folder||'', createdAt:g.createdAt||Date.now(), firstMover: treeFirstColor(tree) || (g.info && g.info.handicap>=2 ? 'W' : 'B'),
+    edit: true, flag: !!g.flag, dirty:false, saved: (State.lists[kind]||[]).some(x=>x.id===g.id),
     info: kind==='game' ? Object.assign(newInfo(), {date:''}, g.info||{}) : null,
   };
   render();
 }
-async function saveItem(){
+let gameSaveTimer = null;
+/** Una partida que ya existe se guarda sola poco después de cada cambio (como la biblioteca de josekis). */
+function gameAutosave(){
+  const gm = State.game; if(!gm || !gm.saved) return;
+  clearTimeout(gameSaveTimer);
+  gameSaveTimer = setTimeout(()=>{ if(State.game===gm) saveItem(true); }, 700);
+}
+async function saveItem(silent){
   const gm = State.game, C = COLL[gm.kind];
   const title = (gm.title||'').trim() || (C.one.charAt(0).toUpperCase()+C.one.slice(1)+' '+fmtDate(todayISO()));
-  const rec = {id:gm.id, title, boardSize:gm.boardSize, setup:gm.setup, tree:cloneTree(gm.tree), createdAt:gm.createdAt};
+  const rec = {id:gm.id, title, boardSize:gm.boardSize, setup:gm.setup, tree:cloneTree(gm.tree), createdAt:gm.createdAt, flag:!!gm.flag, folder:(gm.folder||'').trim()};
   if(gm.info) rec.info = Object.assign({}, gm.info);
   await storeSet(C.prefix+gm.id, rec);
-  gm.title = title; gm.dirty = false;
+  gm.title = title; gm.dirty = false; gm.saved = true;
   State.lists[gm.kind] = await storeListColl(gm.kind);
+  if(silent===true) return;   // autoguardado: sin aviso ni redibujar (no quita el foco al escribir)
   showToast('Guardado.');
   render();
 }
@@ -3398,25 +3508,8 @@ function gameStep(d){
   render();
 }
 function gameClick(x,y){
-  const gm = State.game; if(!gm || !gm.edit) return;
-  const cursor = gm.path[gm.path.length-1];
-  const existing = cursor.children.find(c=>c.x===x && c.y===y);
-  if(existing){ gm.path = gm.path.concat([existing]); render(); return; }
-  const moves = pathToMoves(gm.path);
-  const stones = buildLineDisplay(gm.boardSize, gm.setup, moves).stones;
-  const color = gameTurn(gm);
-  const koKey = moves.length>=1 ? boardKey(buildLineDisplay(gm.boardSize, gm.setup, moves.slice(0,-1)).stones) : null;
-  const check = checkMoveLegality(stones, gm.boardSize, x, y, color, koKey);
-  if(!check.legal){
-    if(check.reason==='occupied') return;
-    showToast(check.reason==='ko' ? 'Jugada ilegal: ko.' : 'Jugada ilegal: suicidio.', 'warn');
-    render(); return;
-  }
-  const node = newTreeNode(x,y,color);
-  cursor.children.push(node);
-  gm.path = gm.path.concat([node]);
-  gm.dirty = true;
-  render();
+  const gm = State.game; if(!gm) return;
+  treeClick(gm, x, y, {size:gm.boardSize, setup:gm.setup, color:()=>gameTurn(gm), onChange:()=>{ gm.dirty = true; gameAutosave(); }});
 }
 function cardFromGamePosition(){
   const gm = State.game;
@@ -3442,6 +3535,7 @@ function gameBody(node){
   let o = '';
   if(node.x!==null) o += `;${node.color}[${coordChar(node.x)}${coordChar(node.y)}]`;
   if(node.comment) o += `C[${sgfText(node.comment)}]`;
+  o += marksToSGF(node.marks);
   if(node.children.length===1) o += gameBody(node.children[0]);
   else node.children.forEach(c=>{ o += '(' + gameBody(c) + ')'; });
   return o;
@@ -3485,8 +3579,9 @@ function parseGameSGF(text){
         if(!child){ child = newTreeNode(q.x,q.y,mv.c); cur.children.push(child); }
         cur = child;
         if(props.C && props.C[0] && !cur.comment) cur.comment = props.C[0];
-      } else if(first && i===0){ if(props.C && props.C[0]) cur.comment = props.C[0]; }
-      else if(props.C && props.C[0] && !cur.comment) cur.comment = props.C[0];
+        mergeMarks(cur, marksFromProps(props, bs));
+      } else if(first && i===0){ if(props.C && props.C[0]) cur.comment = props.C[0]; mergeMarks(cur, marksFromProps(props, bs)); }
+      else { if(props.C && props.C[0] && !cur.comment) cur.comment = props.C[0]; mergeMarks(cur, marksFromProps(props, bs)); }
     });
     g.children.forEach(ch=>walk(ch, cur, false));
   };
@@ -3505,7 +3600,7 @@ function pickSgfFiles(kind){
       try{
         const parsed = parseGameSGF(await f.text());
         const pl = (parsed.info.pb||parsed.info.pw) ? `${parsed.info.pb||'?'} vs ${parsed.info.pw||'?'}` : '';
-        const rec = {id:COLL[kind].idp+uid(), title: parsed.name || pl || f.name.replace(/\.sgf$/i,''), boardSize:parsed.boardSize, setup:parsed.setup, tree:parsed.tree, info:parsed.info, createdAt:Date.now()};
+        const rec = {id:COLL[kind].idp+uid(), title: parsed.name || pl || f.name.replace(/\.sgf$/i,''), boardSize:parsed.boardSize, setup:parsed.setup, tree:parsed.tree, info:parsed.info, createdAt:Date.now(), folder:(State.collFolder && State.collFolder!=='all' && State.collFolder!=='__none__') ? State.collFolder : ''};
         await storeSet(COLL[kind].prefix+rec.id, rec); ok++;
       }catch(e){ bad++; }
     }
@@ -3525,34 +3620,66 @@ function renderCollection(root, kind){
   const hint = document.createElement('p'); hint.className='hint'; hint.textContent = C.hint;
   root.appendChild(hint);
 
-  if(items.length>3){
-    const sf = document.createElement('div'); sf.className='field';
-    const si = document.createElement('input'); si.type='text'; si.id='coll-search'; si.placeholder='Buscar…'; si.value = State.search[kind]||'';
-    si.addEventListener('input', e=>{
-      const pos = e.target.selectionStart; State.search[kind] = e.target.value; render();
-      const el2 = document.getElementById('coll-search'); if(el2){ el2.focus(); el2.setSelectionRange(pos,pos); }
-    });
-    sf.appendChild(si); root.appendChild(sf);
+  const sf = document.createElement('div'); sf.className='field';
+  const si = document.createElement('input'); si.type='text'; si.id='coll-search'; si.placeholder='Buscar por título, jugador…'; si.value = State.search[kind]||'';
+  si.addEventListener('input', e=>{
+    const pos = e.target.selectionStart; State.search[kind] = e.target.value; render();
+    const el2 = document.getElementById('coll-search'); if(el2){ el2.focus(); el2.setSelectionRange(pos,pos); }
+  });
+  sf.appendChild(si); root.appendChild(sf);
+  const srt = document.createElement('div'); srt.className='row';
+  const sortField = document.createElement('div'); sortField.className='field';
+  sortField.innerHTML = '<label>Ordenar por</label>';
+  const sortSel = document.createElement('select');
+  [['alpha','Alfabético (A-Z)'],['alpha-desc','Alfabético (Z-A)'],['newest','Más recientes primero'],['oldest','Más antiguas primero']].forEach(([v,l])=>{ const o=document.createElement('option'); o.value=v; o.textContent=l; sortSel.appendChild(o); });
+  sortSel.value = State.collSort || 'alpha';
+  sortSel.addEventListener('change', ()=>{ State.collSort = sortSel.value; render(); });
+  sortField.appendChild(sortSel); srt.appendChild(sortField); root.appendChild(srt);
+  const folderNames = Array.from(new Set(items.map(g=>g.folder).filter(Boolean))).sort(naturalCompare);
+  if(folderNames.length){
+    const ff = document.createElement('div'); ff.className='field';
+    ff.innerHTML = '<label>Carpeta</label>';
+    const fs = document.createElement('select');
+    const add = (v,l)=>{ const o=document.createElement('option'); o.value=v; o.textContent=l; fs.appendChild(o); };
+    add('all','Todas las carpetas'); folderNames.forEach(n=>add(n,n)); add('__none__','Sin carpeta');
+    fs.value = State.collFolder || 'all';
+    fs.addEventListener('change', ()=>{ State.collFolder = fs.value; render(); });
+    ff.appendChild(fs); srt.insertBefore(ff, srt.firstChild);
   }
+  const flagCount = items.filter(g=>g.flag).length;
+  const flagRow = document.createElement('div'); flagRow.className='btnrow';
+  const flagFilter = document.createElement('button'); flagFilter.className = 'btn' + (State.collFlagOnly ? ' on' : ' ghost');
+  flagFilter.textContent = State.collFlagOnly ? `Mostrando marcadas (${flagCount})` : `Mostrar marcadas (${flagCount})`;
+  flagFilter.addEventListener('click', ()=>{ State.collFlagOnly = !State.collFlagOnly; render(); });
+  flagRow.appendChild(flagFilter); root.appendChild(flagRow);
   const q = (State.search[kind]||'').trim().toLowerCase();
-  const list = items.filter(g=>!q || (g.title||'').toLowerCase().includes(q))
-    .sort((a,b)=>naturalCompare(a.title||'', b.title||''));
+  const hay = g=>((g.title||'')+' '+((g.info&&g.info.pb)||'')+' '+((g.info&&g.info.pw)||'')).toLowerCase();
+  const cmp = {
+    'alpha': (a,b)=>naturalCompare(a.title||'', b.title||''),
+    'alpha-desc': (a,b)=>naturalCompare(b.title||'', a.title||''),
+    'newest': (a,b)=>(b.createdAt||0)-(a.createdAt||0),
+    'oldest': (a,b)=>(a.createdAt||0)-(b.createdAt||0),
+  }[State.collSort || 'alpha'];
+  const cf = State.collFolder || 'all';
+  const list = items.filter(g=>(!q || hay(g).includes(q)) && (!State.collFlagOnly || g.flag)
+    && (cf==='all' || (cf==='__none__' ? !g.folder : g.folder===cf))).sort(cmp);
   if(!list.length){
     const empty = document.createElement('div'); empty.className='empty';
-    empty.innerHTML = items.length ? '<div class="big">Nada que mostrar</div>' : `<div class="big">Aún no hay ${kind==='game'?'partidas':'josekis'}</div><div>Usa «Nueva» o «Importar» en el submenú.</div>`;
-    root.appendChild(empty); return;
+    empty.innerHTML = items.length ? '<div class="big">Nada que mostrar</div>' : `<div class="big">Aún no hay ${kind==='game'?'partidas':'josekis'}</div><div>Usa «Nueva» en el submenú o importa un .sgf abajo.</div>`;
+    root.appendChild(empty); appendImportRow(root, kind); return;
   }
-  list.forEach(g=>{
+  const renderOne = g=>{
     const item = document.createElement('div'); item.className='card-item';
     const mini = document.createElement('div'); mini.className='mini';
     const stones = new Map(); (g.setup||[]).forEach(p=>stones.set(p.x+','+p.y,p.color));
     renderBoard(mini, g.boardSize, stones, null, null);
     item.appendChild(mini);
+    item.appendChild(starBtn(!!g.flag, async ()=>{ g.flag = !g.flag; await storeSet(C.prefix+g.id, g); render(); }));
     const info = document.createElement('div'); info.className='info';
     info.innerHTML = `<div class="note">${esc(g.title)||'(sin título)'}</div><div class="meta">${gameMetaLine(g)}</div>`;
     item.appendChild(info);
     const actions = document.createElement('div'); actions.className='actions';
-    const openBtn = document.createElement('button'); openBtn.className='btn ghost small'; openBtn.textContent='Abrir';
+    const openBtn = document.createElement('button'); openBtn.className='btn pine small'; openBtn.textContent='Abrir';
     openBtn.addEventListener('click', ()=>openItem(g, kind));
     const sgfBtn = document.createElement('button'); sgfBtn.className='btn ghost small'; sgfBtn.textContent='.sgf';
     sgfBtn.addEventListener('click', ()=>downloadText((g.title||C.one).replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', gToSgf(g)));
@@ -3564,13 +3691,32 @@ function renderCollection(root, kind){
     actions.appendChild(openBtn); actions.appendChild(sgfBtn); actions.appendChild(delBtn);
     item.appendChild(actions);
     root.appendChild(item);
+  };
+  const groups = new Map();
+  list.forEach(g=>{ const k = g.folder||''; if(!groups.has(k)) groups.set(k, []); groups.get(k).push(g); });
+  const keys = Array.from(groups.keys()).sort((a,b)=> a===''?1 : b===''?-1 : naturalCompare(a,b));
+  keys.forEach(k=>{
+    if(keys.length>1 || k!==''){
+      const gh = document.createElement('div');
+      gh.style.cssText='font-size:12.5px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:0.04em; margin:16px 0 6px;';
+      gh.textContent = k || 'Sin carpeta';
+      root.appendChild(gh);
+    }
+    groups.get(k).forEach(renderOne);
   });
+  appendImportRow(root, kind);
+}
+function appendImportRow(root, kind){
+  const io = document.createElement('div'); io.className='btnrow'; io.style.marginTop='18px';
+  const b = document.createElement('button'); b.className='btn ghost small'; b.textContent='Importar .sgf';
+  b.addEventListener('click', ()=>pickSgfFiles(kind));
+  io.appendChild(b); root.appendChild(io);
 }
 
 function gameInfoPanel(gm){
   const info = gm.info;
   const wrap = document.createElement('div'); wrap.className='lines-box';
-  const set = (k,v)=>{ info[k]=v; gm.dirty=true; };
+  const set = (k,v)=>{ info[k]=v; gm.dirty=true; gameAutosave(); };
   const inp = (label, key, ph, mode)=>{
     const f = document.createElement('div'); f.className='field'; f.style.flex='1'; f.style.minWidth='0';
     f.innerHTML = `<label>${label}</label>`;
@@ -3605,59 +3751,46 @@ function renderItemEditor(root){
   const top = document.createElement('div'); top.className='btnrow'; top.style.marginTop='0';
   const back = document.createElement('button'); back.className='btn ghost small'; back.textContent='← '+C.title;
   back.addEventListener('click', async ()=>{
-    if(gm.dirty && !confirm('Hay cambios sin guardar. ¿Salir sin guardar?')) return;
+    if(gm.dirty && gm.saved){ clearTimeout(gameSaveTimer); await saveItem(true); }
+    else if(gm.dirty && !confirm('Hay cambios sin guardar. ¿Salir sin guardar?')) return;
     State.game = null; State.lists[gm.kind] = await storeListColl(gm.kind); render();
   });
   top.appendChild(back);
+  const gst = starBtn(!!gm.flag, ()=>{ gm.flag = !gm.flag; gm.dirty = true; gameAutosave(); render(); }); gst.style.marginLeft='auto';
+  top.appendChild(gst);
   root.appendChild(top);
 
   const tf = document.createElement('div'); tf.className='field';
   const ti = document.createElement('input'); ti.type='text'; ti.value = gm.title; ti.placeholder = gm.kind==='joseki' ? 'Nombre del joseki' : 'Título de la partida';
-  ti.addEventListener('input', e=>{ gm.title = e.target.value; gm.dirty = true; });
+  ti.addEventListener('input', e=>{ gm.title = e.target.value; gm.dirty = true; gameAutosave(); });
   tf.appendChild(ti); root.appendChild(tf);
-
-  if(gm.info) root.appendChild(gameInfoPanel(gm));
+  if(gm.info) root.appendChild(folderInputField(gm.folder||'', v=>{ gm.folder = v; gm.dirty = true; gameAutosave(); }, (State.lists.game||[]).map(g=>g.folder), 'game-folder-suggestions'));
 
   const total = gm.path.length-1;
   const stones = gameStones(gm);
   const status = document.createElement('div'); status.className='status-line';
   const tc = gameTurn(gm), pn = gm.info ? (tc==='B' ? gm.info.pb : gm.info.pw) : '';
-  status.innerHTML = `<span>Jugada ${total} · ${tc==='B'?'Negro':'Blanco'}${pn?' ('+esc(pn)+')':''} a jugar${gm.edit ? ' · editando' : ''}</span>`;
+  status.innerHTML = `<span>Jugada ${total} · ${tc==='B'?'Negro':'Blanco'}${pn?' ('+esc(pn)+')':''} a jugar</span>`;
   root.appendChild(status);
+  { const cr = moveCrumbs(gm, gm.boardSize); if(cr) root.appendChild(cr); }
 
   const boardWrap = document.createElement('div'); boardWrap.className='board-wrap';
   root.appendChild(boardWrap);
   const markers = new Map();
   if(total>0){ const m = gm.path[gm.path.length-1]; markers.set(m.x+','+m.y, {type:'last'}); }
   const showCoords = !!(State.prefs && State.prefs.showCoords);
-  renderBoard(boardWrap, gm.boardSize, stones, gm.edit ? (x,y)=>gameClick(x,y) : null, markers, null, null, null, showCoords);
+  renderBoard(boardWrap, gm.boardSize, stones, gm.edit ? (x,y)=>gameClick(x,y) : null, markers, gm.path[gm.path.length-1].marks||null, null, null, showCoords);
 
   const cur = gm.path[gm.path.length-1];
-  const nav = document.createElement('div'); nav.className='btnrow';
-  [['«','Inicio',()=>{ gm.path=[gm.tree]; render(); }, total===0],
-   ['‹','Anterior',()=>gameStep(-1), total===0],
-   ['›','Siguiente',()=>gameStep(1), !cur.children.length],
-   ['»','Final',()=>{ let p=gm.path.slice(); let c=p[p.length-1]; while(c.children.length){ c=c.children[0]; p.push(c); } gm.path=p; render(); }, !cur.children.length]
-  ].forEach(([label,title,fn,dis])=>{
-    const b = document.createElement('button'); b.className='btn ghost'; b.style.flex='1'; b.textContent=label; b.title=title; b.disabled=dis;
-    b.addEventListener('click', fn); nav.appendChild(b);
-  });
-  root.appendChild(nav);
+  root.appendChild(treeNavRow(gm, gm.tree));
 
-  const acts = document.createElement('div'); acts.className='btnrow';
-  const editBtn = document.createElement('button'); editBtn.className='btn small ' + (gm.edit ? 'on' : 'ghost'); editBtn.textContent = gm.edit ? '✎ Editando' : '✎ Editar';
-  editBtn.addEventListener('click', ()=>{ gm.edit = !gm.edit; render(); });
-  const delBtn = document.createElement('button'); delBtn.className='btn ghost small';
-  delBtn.textContent = cur.children.length ? 'Eliminar rama' : 'Eliminar jugada'; delBtn.disabled = total===0 || !gm.edit;
-  delBtn.addEventListener('click', ()=>{
-    if(cur.children.length && !confirm('Esta rama tiene jugadas después. ¿Eliminar todo?')) return;
-    const parent = gm.path[gm.path.length-2];
-    parent.children = parent.children.filter(c=>c!==cur);
-    gm.path = gm.path.slice(0,-1); gm.dirty = true; render();
-  });
+  root.appendChild(markToolbar(gm));
+
+  const acts = document.createElement('div'); acts.className='btnrow fill';
   const saveBtn = document.createElement('button'); saveBtn.className='btn pine small'; saveBtn.textContent='Guardar';
   saveBtn.addEventListener('click', saveItem);
-  acts.appendChild(editBtn); acts.appendChild(delBtn); acts.appendChild(saveBtn);
+  const delBtn = deleteMoveButton(gm, ()=>{ gm.dirty = true; gameAutosave(); });
+  acts.appendChild(saveBtn); acts.appendChild(delBtn);
   root.appendChild(acts);
 
   // comentario de la jugada actual
@@ -3666,8 +3799,19 @@ function renderItemEditor(root){
     const f = document.createElement('div'); f.className='field';
     f.innerHTML = `<label>${lbl}</label>`;
     const t = document.createElement('textarea'); t.style.minHeight='54px'; t.value = cur.comment||''; t.placeholder = 'Comentario de esta jugada';
-    t.addEventListener('input', ()=>{ if(t.value) cur.comment=t.value; else delete cur.comment; gm.dirty=true; });
+    t.addEventListener('input', ()=>{ if(t.value) cur.comment=t.value; else delete cur.comment; gm.dirty=true; gameAutosave(); });
     f.appendChild(t); root.appendChild(f);
+  }
+
+  if(gm.info){
+    const det = document.createElement('details'); det.className='info-box';
+    det.open = !!gm.infoOpen;
+    det.addEventListener('toggle', ()=>{ gm.infoOpen = det.open; });
+    const sm = document.createElement('summary');
+    const i0 = gm.info;
+    sm.textContent = 'Datos de la partida' + ((i0.pb||i0.pw) ? ` · ${i0.pb||'?'} vs ${i0.pw||'?'}` : '');
+    det.appendChild(sm); det.appendChild(gameInfoPanel(gm));
+    root.appendChild(det);
   }
 
   const cardBtnRow = document.createElement('div'); cardBtnRow.className='btnrow';
@@ -3688,15 +3832,7 @@ function renderSettings(root){
   const h = document.createElement('h2'); h.className='section-title'; h.textContent='Ajustes';
   root.appendChild(h);
 
-  if(State.toast){
-    const isWarn = State.toast.type==='warn';
-    const toast = document.createElement('div');
-    toast.style.cssText = isWarn
-      ? 'background:var(--shu-soft); color:var(--shu); border:1px solid var(--shu); border-radius:3px; padding:8px 10px; font-size:13px; margin-bottom:12px;'
-      : 'background:var(--pine-soft); color:var(--pine); border:1px solid var(--pine); border-radius:3px; padding:8px 10px; font-size:13px; margin-bottom:12px;';
-    toast.textContent = State.toast.msg;
-    root.appendChild(toast);
-  }
+  appendToast(root);
 
   const limitField = document.createElement('div'); limitField.className='field';
   limitField.innerHTML = '<label>Límite de repasos por día (0 = sin límite)</label>';
@@ -3860,7 +3996,28 @@ function renderSettings(root){
     });
   }
 
-  const backupTitle = document.createElement('h2'); backupTitle.className='section-title'; backupTitle.textContent='Importar / exportar';
+  const fullTitle = document.createElement('h2'); fullTitle.className='section-title'; fullTitle.textContent='Respaldo completo';
+  root.appendChild(fullTitle);
+  const fullHint = document.createElement('p'); fullHint.className='hint';
+  fullHint.textContent = 'Incluye tarjetas (con calendario y marcas), partidas, biblioteca de josekis y ajustes.';
+  root.appendChild(fullHint);
+  const fullRow = document.createElement('div'); fullRow.className='btnrow fill';
+  const fullBtn = document.createElement('button'); fullBtn.className='btn pine small'; fullBtn.textContent='Exportar respaldo';
+  fullBtn.addEventListener('click', ()=>{
+    const dump = {app:'kifu', version:1, date:new Date().toISOString(), data:storeDump()};
+    downloadBlob(`kifu-respaldo-${todayISO()}.json`, new Blob([JSON.stringify(dump)], {type:'application/json'}));
+  });
+  const restInput = document.createElement('input'); restInput.type='file'; restInput.accept='.json,application/json'; restInput.style.display='none';
+  restInput.addEventListener('change', async ()=>{
+    const f = restInput.files && restInput.files[0]; if(!f) return;
+    if(!confirm('Restaurar sobrescribe lo que tenga el mismo nombre en este navegador. ¿Continuar?')) return;
+    await restoreBackup(await f.text());
+  });
+  const restBtn = document.createElement('button'); restBtn.className='btn ghost small'; restBtn.textContent='Restaurar respaldo';
+  restBtn.addEventListener('click', ()=>restInput.click());
+  fullRow.appendChild(fullBtn); fullRow.appendChild(restBtn); root.appendChild(fullRow); root.appendChild(restInput);
+
+  const backupTitle = document.createElement('h2'); backupTitle.className='section-title'; backupTitle.textContent='Tarjetas: importar / exportar';
   root.appendChild(backupTitle);
   const backupHint = document.createElement('p'); backupHint.className='hint';
   backupHint.textContent = 'Exporta tus tarjetas como .zip de .sgf, o importa un .zip o .sgf para crear varias tarjetas a la vez.';

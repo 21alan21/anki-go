@@ -4,18 +4,18 @@ App de una sola carpeta, sin backend ni dependencias externas. Todo se guarda en
 
 ## Secciones
 
-- **Tsumegos** — *Repasar* (repetición espaciada con límite diario), *Libre* (resolución libre en orden alfabético o aleatorio, sin límite y sin afectar el calendario), *Tarjetas* (carpetas, marcas, editar) y *Crear* (tablero, árbol de variantes, ramas correcta/incorrecta, importar imagen/SGF).
-- **Partidas** — *Mis partidas*, *Nueva* e *Importar* (SGF). Cada partida guarda título, jugadores (con color), kyu/dan, komi, handicap, fecha, resultado y un comentario por jugada. Visor con árbol horizontal; no entran en el repaso.
+- **Tsumegos** — *Repasar* (repetición espaciada con límite diario), *Libre* (resolución libre en orden alfabético o aleatorio, con anterior/siguiente e «Ir a», sin límite y sin afectar el calendario), *Tarjetas* (carpetas, marcas, editar) y *Crear* (tablero, árbol de variantes, ramas correcta/incorrecta, importar imagen/SGF).
+- **Partidas** — *Mis partidas*, *Nueva* e *Importar* (SGF). La lista de partidas tiene búsqueda (título o jugador), carpetas, orden y filtro de marcadas. Cada partida (siempre editable, con ★ de marca y los datos en un desplegable bajo el tablero) guarda título, jugadores (con color), kyu/dan, komi, handicap, fecha, resultado y un comentario por jugada. Visor con árbol horizontal; no entran en el repaso.
 - **Josekis** — *Biblioteca* (un solo árbol SGF; opciones A, B, C…, pérdida de puntos y comentario por jugada, botón «+ Tenuki» solo donde hay tenuki; importar/exportar al final) y *Practicar* (la máquina responde al azar entre tus ramas).
 - **Ajustes** — recorte automático, coordenadas, límite diario, almacenamiento y variantes.
 
 ## Jugar en repaso y práctica
 
-Toca un punto para seleccionarlo; doble toque (o **Confirmar jugada**) para jugarlo. En josekis: **Tenuki** muestra su evaluación, **Ver opciones** muestra las letras, **Atrás** retrocede 2 posiciones (tu jugada y la respuesta; 1 si juegas con ambos colores) y **Reiniciar** vuelve al inicio.
+Toca un punto para seleccionarlo; doble toque (o **Confirmar jugada**) para jugarlo. En josekis: **Tenuki** muestra su evaluación, **Ver opciones** muestra las letras, En partidas y josekis las marcas (triángulo, cuadrado, letra y número) usan el mismo selector que el editor de tsumegos y se guardan por posición en el SGF (TR/SQ/LB). Partidas, josekis y el editor de tsumegos muestran las últimas 10 jugadas sobre el tablero (‹ muestra el resto). Tocar fuera del tablero deshace la jugada seleccionada. En josekis puedes marcar jugadas con ★. **Atrás** retrocede 2 posiciones (tu jugada y la respuesta; 1 si juegas con ambos colores) y **Reiniciar** vuelve al inicio.
 
 ## Variantes (Ajustes)
 
-Para tsumegos y para josekis por separado: **posiciones espejo y rotadas** (las 8 simetrías, incluidos los espejos en diagonal) y **colores invertidos**. Se sortean en cada repaso o práctica; las tarjetas y la biblioteca originales no cambian. En la práctica de josekis, si la posición es simétrica, una jugada equivalente por simetría también se acepta.
+Para tsumegos y para josekis por separado: **posiciones espejo y rotadas** (las 8 simetrías, incluidos los espejos en diagonal) y **colores invertidos**. Se sortean en cada repaso o práctica; las tarjetas y la biblioteca originales no cambian. Si la posición es simétrica, una jugada equivalente por simetría también se acepta, en el repaso de tsumegos y en la práctica de josekis.
 
 ## Archivos
 
@@ -41,6 +41,10 @@ icons/apple-touch-icon.png
 ## Actualizar la app más adelante
 
 Cada vez que subas cambios nuevos a `index.html`, sube también un cambio a `service-worker.js` — basta con subir el número de la constante `VERSION` al principio del archivo (por ejemplo de `'kifu-v1'` a `'kifu-v2'`). Sin ese cambio, el service worker puede seguir sirviendo la versión vieja desde caché por un tiempo.
+
+## Respaldo
+
+Ajustes → **Respaldo completo** exporta un .json con todo (tarjetas con su calendario, partidas, biblioteca de josekis y ajustes) y lo restaura en otro navegador. Las partidas ya guardadas y la biblioteca se autoguardan al editar.
 
 ## Nota sobre los datos
 
