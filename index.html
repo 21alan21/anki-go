@@ -526,6 +526,7 @@ function buildLineDisplay(size, setup, line){
   setup.forEach(p=>stones.set(p.x+','+p.y, p.color));
   const numbers = new Map();
   line.forEach((m,i)=>{
+    if(m.pass || m.x<0) return;   // tenuki (pasar)
     placeStoneWithCaptures(stones, size, m.x, m.y, m.color);
     for(const k of Array.from(numbers.keys())){ if(!stones.has(k)) numbers.delete(k); }
     const key = m.x+','+m.y;
@@ -564,6 +565,14 @@ function recordReviewMove(step, size, x, y, color, moveNumber){
    Árbol de variantes (tronco compartido, ramas para cada elección)
 --------------------------------------------------------------- */
 function newTreeNode(x,y,color){ return {x,y,color,children:[],verdict:null}; }
+/** Tenuki = pasar: nodo sin piedra, con el color de quien pasa. Siempre después de las jugadas normales. */
+function newPassNode(color){ const n = newTreeNode(-1,-1,color); n.pass = true; return n; }
+function passChild(node){ return node.children.find(c=>c.pass) || null; }
+function addChildSorted(node, child){
+  if(child.pass) node.children.push(child);
+  else { const i = node.children.findIndex(c=>c.pass); if(i<0) node.children.push(child); else node.children.splice(i,0,child); }
+}
+function sortPassLast(node){ node.children.sort((a,b)=>(a.pass?1:0)-(b.pass?1:0)); node.children.forEach(sortPassLast); }
 function newTreeRoot(){ return {x:null,y:null,color:null,children:[],verdict:null}; }
 function cloneTree(node){ return JSON.parse(JSON.stringify(node)); }
 /* ---- marcas (compartidas por tsumegos, partidas y josekis): triángulo, cuadrado, letra y número ---- */
@@ -592,7 +601,7 @@ function moveCrumbs(h, size){
     if(hidden && !h.crumbsAll && i<=total-KEEP) return;
     const chip = document.createElement('button'); chip.className='btn ghost small';
     chip.style.cssText = 'padding:4px 8px; font-size:11.5px;' + (i===h.path.length-1 ? ' border-color:var(--pine); color:var(--pine);' : '');
-    chip.textContent = `${i}.${node.color==='B'?'N':'B'}${coordLabel(node.x,node.y,size)}`;
+    chip.textContent = `${i}.${node.color==='B'?'N':'B'}${node.pass ? 'T' : coordLabel(node.x,node.y,size)}`;
     chip.addEventListener('click', ()=>{ h.path = h.path.slice(0,i); render(); });
     crumbRow.appendChild(chip);
   });
@@ -655,10 +664,10 @@ function markShapeField(holder){
   return f;
 }
 /** Modo (jugadas / marcas) para partidas y josekis, con el mismo aspecto que el editor de tsumegos. */
-function markToolbar(holder){
+function markToolbar(holder, extras){
   const box = document.createElement('div');
   const row = document.createElement('div'); row.className='btnrow fill';
-  [['play','Jugadas'],['marks','Marcas']].forEach(([key,label])=>{
+  [['play','Jugadas'],['marks','Marcas']].concat(extras||[]).forEach(([key,label])=>{
     const b = document.createElement('button'); b.className = 'btn small' + ((holder.mode||'play')===key ? ' on':' ghost'); b.textContent = label;
     b.addEventListener('click', ()=>{ holder.mode = key; render(); });
     row.appendChild(b);
@@ -927,7 +936,7 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers, 
 /** Recoge todos los puntos (x,y) usados en el árbol, para calcular el recorte relevante. */
 function collectAllTreePoints(node, pts){
   pts = pts || [];
-  if(node.x!==null) pts.push({x:node.x,y:node.y});
+  if(node.x!==null && !node.pass) pts.push({x:node.x,y:node.y});
   (node.marks||[]).forEach(m=>pts.push({x:m.x,y:m.y}));
   node.children.forEach(c=>collectAllTreePoints(c,pts));
   return pts;
@@ -1983,7 +1992,7 @@ function lineToText(line, size){
 }
 /** Convierte st.path (nodos raíz→cursor) en una lista de jugadas {x,y,color}. */
 function pathToMoves(path){
-  return path.slice(1).map(n=>({x:n.x,y:n.y,color:n.color}));
+  return path.slice(1).map(n=>({x:n.x,y:n.y,color:n.color,pass:!!n.pass}));
 }
 /** Dibuja el árbol completo como una lista anidada clicable, dentro de `container`. */
 /**
@@ -2033,7 +2042,7 @@ function renderTreeGraph(container, tree, size, currentPath, onPick){
       const ring = nd.verdict==='correct' ? "var(--pine)" : (nd.verdict==='wrong' ? "var(--shu)" : (isB ? "#000" : "var(--stone-white-2)"));
       g.appendChild(el("circle",{cx,cy,r:R, fill: isB ? "var(--stone-black-1)" : "var(--stone-white-1)", stroke: ring, "stroke-width": nd.verdict ? 2.5 : 1}));
       const t = el("text",{x:cx, y:cy, "text-anchor":"middle", "dominant-baseline":"central", "font-size": n.col>=100 ? 8 : (n.col>=10 ? 9.5 : 11), "font-family":"Georgia, serif", fill: isB ? "var(--paper)" : "var(--ink)"});
-      t.textContent = n.col;
+      t.textContent = nd.pass ? 'T' : n.col;
       t.style.pointerEvents = 'none';
       g.appendChild(t);
       if(isCur) g.appendChild(el("circle",{cx,cy,r:R+3.5, fill:"none", stroke:"var(--ink)", "stroke-width":1.5, "stroke-dasharray":"3 2"}));
@@ -2874,7 +2883,7 @@ async function goNeighborCard(dir){
 
 /* ----------------------- Josekis: un solo árbol (un único archivo SGF) ----------------------- */
 // Cada nodo puede llevar: comment (texto), loss (puntos que pierde esa jugada frente a la mejor)
-// y tenuki:{loss, comment} (evaluación de ignorar la posición). En SGF: C[], LOSS[], TENUKI[], TENUKIC[].
+// El tenuki es un nodo «pasar» ({pass:true}, SGF ;B[] / ;W[]) con su propia continuación. En SGF: C[], LOSS[].
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 /** Campo «Carpeta» con sugerencias; el mismo en tarjetas y partidas. */
 function folderInputField(value, onInput, names, listId){
@@ -2905,7 +2914,7 @@ function mergeTreeInto(t, src, title, depth){
   src.children.forEach(sc=>{
     let tc = t.children.find(c=>c.x===sc.x && c.y===sc.y && c.color===sc.color);
     if(!tc){
-      tc = newTreeNode(sc.x, sc.y, sc.color); t.children.push(tc); added++;
+      tc = newTreeNode(sc.x, sc.y, sc.color); if(sc.pass) tc.pass = true; addChildSorted(t, tc); added++;
       if(depth===0 && title && !tc.comment) tc.comment = title;
     }
     if(sc.comment && !tc.comment) tc.comment = sc.comment;
@@ -2916,6 +2925,29 @@ function mergeTreeInto(t, src, title, depth){
     added += mergeTreeInto(tc, sc, title, depth+1);
   });
   return added;
+}
+/** Convierte el tenuki antiguo ({loss,comment,move}) en un nodo «pasar» con su continuación. */
+function migrateTenuki(book){
+  let changed = false;
+  const first = bookFirstColor(book);
+  const walk = (node)=>{
+    if(node.tenuki){
+      const t = node.tenuki; delete node.tenuki; changed = true;
+      const opp = c=>c==='B'?'W':'B';
+      const prev = node.color || opp(first);
+      if(!passChild(node)){
+        const p = newPassNode(opp(prev));
+        if(t.loss!=null && t.loss!=='') p.loss = t.loss;
+        if(t.comment) p.comment = t.comment;
+        if(t.move){ const st = newTreeNode(t.move.x, t.move.y, prev); p.children.push(st); }
+        node.children.push(p);
+      }
+    }
+    node.children.forEach(walk);
+  };
+  walk(book.tree);
+  if(changed) sortPassLast(book.tree);
+  return changed;
 }
 async function loadJosekiBook(){
   const recs = await storeListColl('joseki');
@@ -2928,6 +2960,7 @@ async function loadJosekiBook(){
     await storeSet('joseki:main', main);
     for(const r of old) await storeDelete('joseki:'+r.id);
   }
+  if(migrateTenuki(main)){ await storeSet('joseki:main', main); }
   return main;
 }
 async function saveBook(){ await storeSet('joseki:main', State.book); }
@@ -2942,16 +2975,11 @@ function bookNodeProps(n){
   if(n.loss!=null && n.loss!=='') o += `LOSS[${n.loss}]`;
   if(n.flag) o += 'FLAG[1]';
   o += marksToSGF(n.marks);
-  if(n.tenuki){
-    if(n.tenuki.loss!=null && n.tenuki.loss!=='') o += `TENUKI[${n.tenuki.loss}]`;
-    if(n.tenuki.comment) o += `TENUKIC[${sgfText(n.tenuki.comment)}]`;
-    if(n.tenuki.loss==null && !n.tenuki.comment) o += 'TENUKIC[]';
-  }
   return o;
 }
 function bookBody(node){
   let o = '';
-  if(node.x!==null) o += `;${node.color}[${coordChar(node.x)}${coordChar(node.y)}]` + bookNodeProps(node);
+  if(node.x!==null) o += `;${node.color}[${node.pass ? '' : coordChar(node.x)+coordChar(node.y)}]` + bookNodeProps(node);
   if(node.children.length===1) o += bookBody(node.children[0]);
   else node.children.forEach(c=>{ o += '(' + bookBody(c) + ')'; });
   return o;
@@ -2969,6 +2997,7 @@ function mergeSGFIntoBook(text, book){
   if((head.AB && head.AB.length) || (head.AW && head.AW.length)) return null;
   const applyProps = (node, props)=>{
     if(props.C && props.C[0] && !node.comment) node.comment = props.C[0];
+    if(props.TENUKIM){ const q = sgfXY(props.TENUKIM[0]); if(q && q.x<book.boardSize && q.y<book.boardSize){ node.tenuki = node.tenuki||{}; if(!node.tenuki.move) node.tenuki.move = {x:q.x,y:q.y}; } }
     if(props.FLAG) node.flag = true;
     mergeMarks(node, marksFromProps(props, book.boardSize));
     if(props.LOSS){ const v = parseFloat(props.LOSS[0]); if(!isNaN(v) && node.loss==null) node.loss = v; }
@@ -2981,16 +3010,18 @@ function mergeSGFIntoBook(text, book){
     g.sequence.forEach((props, i)=>{
       const mv = props.B ? {c:'B', v:props.B[0]} : (props.W ? {c:'W', v:props.W[0]} : null);
       if(mv){
-        const pt = sgfXY(mv.v);
-        if(!pt || pt.x>=book.boardSize || pt.y>=book.boardSize) return;   // pase
-        let child = cur.children.find(c=>c.x===pt.x && c.y===pt.y && c.color===mv.c);
-        if(!child){ child = newTreeNode(pt.x, pt.y, mv.c); cur.children.push(child); added++; }
+        const isPass = mv.v==='' || (mv.v==='tt' && book.boardSize<=19);
+        const pt = isPass ? null : sgfXY(mv.v);
+        if(!isPass && (!pt || pt.x>=book.boardSize || pt.y>=book.boardSize)) return;
+        let child = isPass ? cur.children.find(c=>c.pass && c.color===mv.c) : cur.children.find(c=>c.x===pt.x && c.y===pt.y && c.color===mv.c);
+        if(!child){ child = isPass ? newPassNode(mv.c) : newTreeNode(pt.x, pt.y, mv.c); addChildSorted(cur, child); added++; }
         cur = child; applyProps(cur, props);
       } else if(!(first && i===0)) applyProps(cur, props);   // comentarios sueltos; la cabecera se ignora
     });
     g.children.forEach(ch=>walk(ch, cur, false));
   };
   walk(gt, book.tree, true);
+  migrateTenuki(book);
   return added;
 }
 async function exportBook(){
@@ -3019,10 +3050,11 @@ function pickJosekiFiles(){
 }
 
 // --- utilidades de árbol ---
-function bookFirstColor(book){ return (book.tree.children[0] && book.tree.children[0].color) || 'B'; }
+function bookFirstColor(book){ const c = book.tree.children.find(c=>!c.pass) || book.tree.children[0]; return (c && c.color) || 'B'; }
 function bookTurn(book, path){
-  const first = bookFirstColor(book);
-  return (path.length-1)%2===0 ? first : (first==='B' ? 'W' : 'B');
+  const last = path[path.length-1];
+  if(last && last.color) return last.color==='B' ? 'W' : 'B';
+  return bookFirstColor(book);
 }
 function bookStones(book, path){ return buildLineDisplay(book.boardSize, [], pathToMoves(path)).stones; }
 function fmtLoss(v){ return v==null || v==='' ? '—' : (Number(v)===0 ? '0 pts' : Number(v)+' pts'); }
@@ -3049,7 +3081,7 @@ function treeClick(h, x, y, o){
     render(); return;
   }
   const node = newTreeNode(x,y,color);
-  cursor.children.push(node);
+  addChildSorted(cursor, node);
   h.path = h.path.concat([node]);
   o.onChange();
   render();
@@ -3150,22 +3182,25 @@ function renderBook(root){
   const boardWrap = document.createElement('div'); boardWrap.className='board-wrap';
   root.appendChild(boardWrap);
   const markers = new Map();
-  cur.children.forEach((c,i)=>{
+  cur.children.filter(c=>!c.pass).forEach((c,i)=>{
     markers.set(c.x+','+c.y, {type:'letter', text:LETTERS[i]||'?'});
   });
+  const shown = stones;
   const crop = (!State.prefs || State.prefs.autoCrop!==false) ? computeCropBounds(book.boardSize, [], book.tree, []) : null;
   const showCoords = !!(State.prefs && State.prefs.showCoords);
-  renderBoard(boardWrap, book.boardSize, stones, (x,y)=>bookClick(x,y), markers, cur.marks||null, null, crop, showCoords);
+  renderBoard(boardWrap, book.boardSize, shown, (x,y)=>bookClick(x,y), markers, cur.marks||null, null, crop, showCoords);
 
   root.appendChild(treeNavRow(bk, book.tree));
-  root.appendChild(markToolbar(bk));
+  root.appendChild(markToolbar(bk, []));
 
   const acts = document.createElement('div'); acts.className='btnrow fill';
   const delBtn = deleteMoveButton(bk, saveBook);
-  const tenBtn = document.createElement('button'); tenBtn.className='btn small ' + (cur.tenuki ? 'on' : 'ghost'); tenBtn.textContent = cur.tenuki ? 'Quitar tenuki' : '+ Tenuki';
+  const pc = passChild(cur);
+  const tenBtn = document.createElement('button'); tenBtn.className='btn small ' + (pc ? 'on' : 'ghost'); tenBtn.textContent = pc ? 'Tenuki' : '+ Tenuki';
   tenBtn.addEventListener('click', ()=>{
-    if(cur.tenuki){ delete cur.tenuki; } else { cur.tenuki = {}; }
-    saveBook(); render();
+    let p = pc;
+    if(!p){ p = newPassNode(turn); addChildSorted(cur, p); saveBook(); }
+    bk.path = bk.path.concat([p]); render();
   });
   acts.appendChild(tenBtn); acts.appendChild(delBtn);
   root.appendChild(acts);
@@ -3179,7 +3214,7 @@ function renderBook(root){
   // esta jugada: pérdida de puntos (pequeña) + comentario — siempre visible, también en la posición inicial
   {
     const hd = document.createElement('div'); hd.style.cssText='display:flex; align-items:center; justify-content:space-between; margin:6px 0 4px; font-size:12.5px; color:var(--ink-soft);';
-    const lbl = document.createElement('span'); lbl.textContent = total>0 ? `Esta jugada (${coordLabel(cur.x,cur.y,book.boardSize)})` : 'Posición inicial';
+    const lbl = document.createElement('span'); lbl.textContent = total>0 ? `Esta jugada (${cur.pass ? 'tenuki' : coordLabel(cur.x,cur.y,book.boardSize)})` : 'Posición inicial';
     hd.appendChild(lbl);
     root.appendChild(hd);
     const lc = lossComment(()=>cur.loss, v=>{ if(v==null) delete cur.loss; else cur.loss=v; },
@@ -3187,15 +3222,6 @@ function renderBook(root){
     if(total===0){ const inp = lc.querySelector('.loss input'); inp.disabled = true; inp.style.opacity='0.4'; }
     root.appendChild(lc);
   }
-  // tenuki en esta posición (solo si se agregó)
-  if(cur.tenuki){
-    const tl = document.createElement('div'); tl.style.cssText='font-size:12.5px; color:var(--ink-soft); margin:6px 0 4px;';
-    tl.textContent = 'Si se hace tenuki aquí';
-    root.appendChild(tl);
-    root.appendChild(lossComment(()=>cur.tenuki.loss, v=>{ if(v==null) delete cur.tenuki.loss; else cur.tenuki.loss=v; },
-      ()=>cur.tenuki.comment, v=>{ if(v) cur.tenuki.comment=v; else delete cur.tenuki.comment; }, ''));
-  }
-
   const io = document.createElement('div'); io.className='btnrow'; io.style.marginTop='18px';
   const impBtn = document.createElement('button'); impBtn.className='btn ghost small'; impBtn.textContent='Importar .sgf';
   impBtn.addEventListener('click', pickJosekiFiles);
@@ -3294,6 +3320,17 @@ function jpSymmetricMatch(js, x, y){
   }
   return null;
 }
+/** Pasar: si la biblioteca tiene el tenuki aquí, sigue la secuencia local; si no, cuenta como fallo. */
+function jpTenuki(){
+  const js = State.jp;
+  if(js.busy || !jpUserTurn(js)) return;
+  const cur = js.path[js.path.length-1];
+  const p = passChild(cur);
+  js.pending = null;
+  if(!p){ js.mistakes++; js.panel = 'miss'; js.msg = 'Tenuki no está en tu biblioteca aquí.'; render(); return; }
+  js.path = js.path.concat([p]); js.panel = null; js.msg = ''; js.notes = [jpNote('Tenuki', p)];
+  render(); jpMachine();
+}
 function jpConfirm(){
   const js = State.jp;
   if(!js.pending || js.busy || !jpUserTurn(js)) return;
@@ -3349,7 +3386,7 @@ function renderBookPractice(root){
   const boardWrap = document.createElement('div'); boardWrap.className='board-wrap';
   root.appendChild(boardWrap);
   const markers = new Map();
-  if(js.showOptions && userTurn) cur.children.forEach((c,i)=>markers.set(c.x+','+c.y, {type:'letter', text:LETTERS[i]||'?'}));
+  if(js.showOptions && userTurn) cur.children.filter(c=>!c.pass).forEach((c,i)=>markers.set(c.x+','+c.y, {type:'letter', text:LETTERS[i]||'?'}));
   if(js.pending) markers.set(js.pending.x+','+js.pending.y, {type:'pending'});
   const crop = (!State.prefs || State.prefs.autoCrop!==false) ? computeCropBounds(book.boardSize, [], book.tree, []) : null;
   const showCoords = !!(State.prefs && State.prefs.showCoords);
@@ -3360,9 +3397,9 @@ function renderBookPractice(root){
   const confirmBtn = document.createElement('button'); confirmBtn.className='btn pine small'; confirmBtn.textContent='Confirmar jugada'; confirmBtn.dataset.keep='1';
   confirmBtn.disabled = !js.pending || !userTurn || js.busy;
   confirmBtn.addEventListener('click', jpConfirm);
-  const tenukiBtn = document.createElement('button'); tenukiBtn.className='btn small ' + (js.panel==='tenuki' ? 'on' : 'ghost'); tenukiBtn.textContent='Tenuki';
+  const tenukiBtn = document.createElement('button'); tenukiBtn.className='btn small ghost'; tenukiBtn.textContent='Tenuki';
   tenukiBtn.disabled = !userTurn || js.busy;
-  tenukiBtn.addEventListener('click', ()=>{ js.pending=null; js.msg=''; js.panel = js.panel==='tenuki' ? null : 'tenuki'; render(); });
+  tenukiBtn.addEventListener('click', jpTenuki);
   const optBtn = document.createElement('button'); optBtn.className='btn small ' + (js.showOptions ? 'on' : 'ghost'); optBtn.textContent = js.showOptions ? 'Ocultar opciones' : 'Ver opciones';
   optBtn.disabled = !userTurn;
   optBtn.addEventListener('click', ()=>{ js.showOptions = !js.showOptions; render(); });
@@ -3379,13 +3416,6 @@ function renderBookPractice(root){
     const retry = document.createElement('button'); retry.className='btn ghost small'; retry.textContent='Intentar de nuevo';
     retry.addEventListener('click', ()=>{ js.panel=null; js.msg=''; render(); });
     row.appendChild(show); row.appendChild(retry); box.appendChild(row);
-    root.appendChild(box);
-  }
-  if(js.panel==='tenuki'){
-    const box = document.createElement('div'); box.className='lines-box';
-    const t = cur.tenuki || {};
-    box.innerHTML = `<div class="line-item"><span><strong>Tenuki</strong></span><span style="color:var(--ink-soft); font-size:12.5px;">${esc(fmtLoss(t.loss))}</span></div>`
-      + (t.comment ? `<div style="font-size:13px; margin-top:6px; white-space:pre-wrap;">${esc(t.comment)}</div>` : (t.loss==null ? '<div style="font-size:12.5px; color:var(--ink-soft); margin-top:6px;">Sin evaluación registrada.</div>' : ''));
     root.appendChild(box);
   }
   // notas de lo último que se jugó (pérdida y comentario)
