@@ -162,6 +162,9 @@
   .btnrow.fill .btn{flex:1;}
   button.star{width:30px; height:30px; padding:0; flex:none; border:1px solid var(--line); background:transparent; color:var(--ink-soft); border-radius:var(--radius); font-size:16px; line-height:1; cursor:pointer;}
   button.star.on{color:#b8860b; border-color:#b8860b; background:var(--paper-deep);}
+  button.star.doubt{font-family:Georgia,serif; font-weight:700; font-size:15px;}
+  button.star.doubt.on{color:var(--shu); border-color:var(--shu); background:var(--shu-soft);}
+  button.btn.icon{padding:7px 10px; line-height:0; display:inline-flex; align-items:center; justify-content:center;}
   .titlebar{display:flex; align-items:center; justify-content:space-between; gap:10px;}
   .titlebar h2{margin-bottom:0; flex:1;}
   details.info-box{border:1px solid var(--line); border-radius:var(--radius); margin:10px 0; background:var(--paper-deep);}
@@ -370,7 +373,8 @@ async function restoreBackup(text){
   for(const [k,v] of Object.entries(obj.data)){ await storeSet(k, v); n++; }
   showToast(`Respaldo restaurado (${n} elementos).`);
   State.prefs = Object.assign({}, DEFAULT_PREFS, await storeGet('prefs'));
-  State.cards = await storeListCards(); State.book = null; State.bk = null; State.jp = null; State.game = null;
+  State.cards = await storeListCards(); State.book = null; State.bk = null; State.jp = null; State.jpSrc = null; State.game = null;
+  await loadJosekiList();
   State.lists.game = await storeListColl('game');
   await updateDueBadge();
   render();
@@ -395,6 +399,7 @@ function normalizeCard(card){
   if(card.title===undefined){ card.title = card.note || ''; card.note = ''; } // antes la nota hacía de título
   if(!card.note) card.note = '';
   card.flag = !!card.flag;
+  card.doubt = !!card.doubt;
   if(!card.folder) card.folder = '';
   if(!card.createdAt) card.createdAt = 0; // tarjetas antiguas sin marca de tiempo
   return card;
@@ -872,6 +877,12 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers, 
           const t = el("text",{x:cx,y:cy,"text-anchor":"middle","dominant-baseline":"central","font-size":Math.max(2.6,cell*0.36),"font-family":"Georgia, serif",fill:"#fff"});
           t.textContent = m.n; svg.appendChild(t);
         }
+        return;
+      }
+      if(m.type==='ghost'){   // jugada seleccionada, a la espera de confirmar
+        const gb = m.color==='B';
+        svg.appendChild(el("circle",{cx,cy,r:cell*0.46, fill: gb ? "var(--stone-black-1)" : "var(--stone-white-1)", "fill-opacity":0.62, stroke: gb ? "#000" : "var(--stone-white-2)", "stroke-width":0.4}));
+        svg.appendChild(el("circle",{cx,cy,r:cell*0.12, fill:"var(--shu)"}));
         return;
       }
       const stoneAtPt = stones.get(key);
@@ -1373,6 +1384,7 @@ const State = {
   listSort: 'alpha',
   listDraftsOnly: false,
   listFlagOnly: false,
+  listDoubtOnly: false,
   listSearch: '',
   reviewIdx: 0,
   reviewStep: null,
@@ -1381,7 +1393,7 @@ const State = {
   toastTimer: null,
   returnToReview: false,
   lists: {game:[], joseki:[]},
-  book: null, bk: null, jp: null,
+  book: null, bk: null, jp: null, jpSrc: null, jpSel: 'all',
   game: null,
   search: {game:'', joseki:''},
   joseki: null,
@@ -1469,14 +1481,12 @@ async function onSubmenu(key){
   } else if(action==='import'){
     await switchView(view);
     pickSgfFiles(kind);
-  } else if(action==='export'){
-    if(!State.book) State.book = await loadJosekiBook();
-    if(!State.book.tree.children.length){ showToast('La biblioteca está vacía.', 'warn'); render(); return; }
-    downloadText('josekis.sgf', bookToSGF(State.book));
   }
 }
 
 async function switchView(v){
+  if(State.view==='create' && v!=='create') await flushCreateSave();
+  if(State.view==='joseki-lib' && State.book){ clearTimeout(bookTimer); await saveBookIfMeaningful(); }
   clearTimeout(State.toastTimer);
   State.toast = null;
   if(v!=='create') State.returnToReview = false;
@@ -1488,7 +1498,15 @@ async function switchView(v){
   if(v==='list') State.cards = await storeListCards();
   if(v==='settings') State.cards = await storeListCards();
   if(v==='games') State.lists.game = await storeListColl('game');
-  if(v==='joseki-lib' || v==='joseki-play'){ if(!State.book) State.book = await loadJosekiBook(); }
+  if(v==='games' || v==='joseki-lib'){ if(State.collKind!==v){ State.collKind = v; State.collFolder = 'all'; State.collFlagOnly = false; } }
+  if(v==='joseki-lib' || v==='joseki-play'){
+    await loadJosekiList();
+    if(State.book){
+      const fresh = State.lists.joseki.find(r=>r.id===State.book.id);
+      if(fresh) State.book = fresh; else if(v==='joseki-play') State.book = null;
+    }
+  }
+  if(v==='joseki-play'){ State.jpSrc = null; State.jp = null; }
   render();
   updateDueBadge();
 }
@@ -1691,7 +1709,7 @@ function render(){
   else if(State.view==='review' || State.view==='free') renderReview(view);
   else if(State.view==='settings') renderSettings(view);
   else if(State.view==='games') renderCollection(view, 'game');
-  else if(State.view==='joseki-lib') renderBook(view);
+  else if(State.view==='joseki-lib'){ if(State.book) renderBook(view); else renderCollection(view, 'joseki'); }
   else if(State.view==='joseki-play') renderBookPractice(view);
   else renderList(view);
 }
@@ -1703,7 +1721,7 @@ function renderCreate(root){
   appendToast(root);
 
   const h = document.createElement('h2'); h.className='section-title';
-  h.textContent = st.id ? 'Editar tarjeta' : 'Crear tarjeta';
+  h.textContent = (st.id && !st.createdNew) ? 'Editar tarjeta' : 'Crear tarjeta';
   root.appendChild(h);
 
   // modo de edición — arriba de todo, es lo primero que se usa
@@ -1815,7 +1833,7 @@ function renderCreate(root){
   const hasAnything = hasCorrect || st.setup.length>0 || st.tree.children.length>0;
 
   // anterior · siguiente (misma carpeta, orden natural por título)
-  if(st.id){
+  if(st.id && !st.createdNew){
     const navRow = document.createElement('div'); navRow.className='btnrow';
     const sibs = State.cards.filter(c=>(c.folder||'')===(st.origFolder||''))
       .sort((a,b)=>naturalCompare(cardSortLabel(a), cardSortLabel(b)) || a.id.localeCompare(b.id));
@@ -1834,19 +1852,14 @@ function renderCreate(root){
   // fila 1: guardar · nueva
   const saveRow = document.createElement('div'); saveRow.className='btnrow';
   const saveBtn = document.createElement('button'); saveBtn.className='btn pine';
-  saveBtn.textContent = st.id ? 'Guardar cambios' : 'Guardar tarjeta';
+  saveBtn.textContent = (st.id && !st.createdNew) ? 'Guardar y siguiente' : 'Guardar y nueva';
   saveBtn.disabled = !hasAnything;
   saveBtn.addEventListener('click', saveCurrentCard);
   const clearBtn = document.createElement('button'); clearBtn.className='btn ghost';
   clearBtn.textContent = 'Nueva tarjeta';
-  clearBtn.addEventListener('click', ()=>{ State.create = freshCreate(); render(); });
+  clearBtn.addEventListener('click', async ()=>{ await flushCreateSave(); State.create = freshCreate(); render(); });
   saveRow.appendChild(saveBtn); saveRow.appendChild(clearBtn);
   root.appendChild(saveRow);
-  if(!hasCorrect && hasAnything){
-    const draftHint = document.createElement('p'); draftHint.className='hint'; draftHint.style.margin='-6px 0 10px';
-    draftHint.textContent = 'Se guarda como borrador — no aparece en el repaso hasta tener una línea correcta.';
-    root.appendChild(draftHint);
-  }
 
   // fila 2: eliminar · ver tablero completo
   const toolRow = document.createElement('div'); toolRow.className='btnrow';
@@ -1868,10 +1881,13 @@ function renderCreate(root){
   }
   toolRow.appendChild(delBtn);
   if(!State.prefs || State.prefs.autoCrop!==false){
-    const zoomBtn = document.createElement('button'); zoomBtn.className='btn ghost';
-    zoomBtn.textContent = st.forceFullBoard ? 'Vista recortada' : 'Ver tablero completo';
-    zoomBtn.addEventListener('click', ()=>{ st.forceFullBoard = !st.forceFullBoard; render(); });
-    toolRow.appendChild(zoomBtn);
+    const mkZoom = (plus, title, disabled, fn)=>{
+      const b = document.createElement('button'); b.className='btn ghost icon'; b.title = title; b.setAttribute('aria-label', title);
+      b.innerHTML = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10" cy="10" r="6.5"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="7" y1="10" x2="13" y2="10"/>${plus?'<line x1="10" y1="7" x2="10" y2="13"/>':''}</svg>`;
+      b.disabled = disabled; b.addEventListener('click', fn); return b;
+    };
+    toolRow.appendChild(mkZoom(false, 'Alejar (tablero completo)', !!st.forceFullBoard, ()=>{ st.forceFullBoard = true; render(); }));
+    toolRow.appendChild(mkZoom(true, 'Acercar (recortar)', !st.forceFullBoard, ()=>{ st.forceFullBoard = false; render(); }));
   }
   root.appendChild(toolRow);
 
@@ -1892,7 +1908,7 @@ function renderCreate(root){
   titleField.innerHTML = '<label>Título</label>';
   const titleInput = document.createElement('input'); titleInput.type='text'; titleInput.value=st.title||'';
   titleInput.placeholder = (!State.prefs || State.prefs.autoTitle!==false) ? autoTitleFor((State.prefs&&State.prefs.nextNumber)||1) : 'Título';
-  titleInput.addEventListener('input', e=>{ st.title = e.target.value; });
+  titleInput.addEventListener('input', e=>{ st.title = e.target.value; createAutosaveCheck(); });
   titleField.appendChild(titleInput);
   panels.datos.appendChild(titleField);
 
@@ -1900,11 +1916,11 @@ function renderCreate(root){
   noteField.innerHTML = '<label>Nota (opcional)</label>';
   const noteInput = document.createElement('textarea'); noteInput.style.minHeight='54px'; noteInput.style.height='54px'; noteInput.value=st.note||'';
   noteInput.placeholder='p. ej. contacto por fuera, cuidado con el ko';
-  noteInput.addEventListener('input', e=>{ st.note = e.target.value; });
+  noteInput.addEventListener('input', e=>{ st.note = e.target.value; createAutosaveCheck(); });
   noteField.appendChild(noteInput);
   panels.datos.appendChild(noteField);
 
-  panels.datos.appendChild(folderInputField(st.folder||'', v=>{ st.folder = v; }, State.cards.map(c=>c.folder), 'folder-suggestions'));
+  panels.datos.appendChild(folderInputField(st.folder||'', v=>{ st.folder = v; createAutosaveCheck(); }, State.cards.map(c=>c.folder), 'folder-suggestions'));
 
 
   const sizeField = document.createElement('div'); sizeField.className='field'; 
@@ -1980,6 +1996,70 @@ function renderCreate(root){
   if(st.panel && panels[st.panel]) root.appendChild(panels[st.panel]);
 
   if(st.importPicker) renderImportPicker(root, st);
+  createAutosaveCheck();
+}
+
+/* ---- autoguardado del editor de tarjetas ---- */
+let createSaveTimer = null;
+function createHasContent(st){
+  return st.setup.length>0 || st.tree.children.length>0;
+}
+function createAutosaveCheck(){
+  const st = State.create;
+  if(!st || State.view!=='create' || !createHasContent(st)) return;
+  if(editSignature(st)===st.lastSaved) return;
+  clearTimeout(createSaveTimer);
+  createSaveTimer = setTimeout(()=>autosaveCreate(st), 700);
+}
+async function flushCreateSave(){
+  clearTimeout(createSaveTimer);
+  const st = State.create;
+  if(st && createHasContent(st) && editSignature(st)!==st.lastSaved) await autosaveCreate(st);
+}
+async function autosaveCreate(st){
+  if(!createHasContent(st)) return;
+  const sig = editSignature(st);
+  if(sig===st.lastSaved) return;
+  const isNew = !st.id;
+  const id = st.id || uid();
+  if(isNew){ st.id = id; st.createdNew = true; }   // se asigna antes de guardar: un "Guardar" posterior no duplica la tarjeta
+  const existing = (await storeGet('card:'+id)) || null;
+  let title = (st.title||'').trim();
+  if(isNew){
+    // misma numeración automática que al guardar a mano, solo al crear la tarjeta
+    if(title.includes('{}')){
+      const n = (State.prefs && State.prefs.nextNumber) || 1;
+      State.prefs = Object.assign({}, State.prefs, {nextNumber: n+1, lastTitleTemplate: title});
+      title = title.split('{}').join(n);
+      st.title = title;
+    } else if(!title && (!State.prefs || State.prefs.autoTitle!==false)){
+      const n = (State.prefs && State.prefs.nextNumber) || 1;
+      State.prefs = Object.assign({}, State.prefs, {nextNumber: n+1, lastTitleTemplate: ''});
+      title = autoTitleFor(n);
+      st.title = title;
+    }
+    await storeSet('prefs', State.prefs);
+  } else if(title.includes('{}')){
+    title = existing ? existing.title : '';
+  }
+  const card = {
+    id, boardSize: st.boardSize,
+    setup: JSON.parse(JSON.stringify(st.setup)),
+    folder: (st.folder||'').trim(),
+    tree: cloneTree(st.tree),
+    marks: JSON.parse(JSON.stringify(st.marks||[])),
+    title,
+    note: (st.note||'').trim(),
+    flag: !!(existing && existing.flag),
+    doubt: !!(existing && existing.doubt),
+    createdAt: (existing && existing.createdAt) || Date.now(),
+    srs: (existing && existing.srs) || defaultSRS(),
+  };
+  await storeSet('card:'+card.id, card);
+  st.lastSaved = editSignature(st); st.snapshot = st.lastSaved;
+  saveFolderDefault(card.folder);
+  State.cards = await storeListCards();
+  updateDueBadge();
 }
 
 function nextColorLabel(firstMover, count){
@@ -1994,27 +2074,53 @@ function lineToText(line, size){
 function pathToMoves(path){
   return path.slice(1).map(n=>({x:n.x,y:n.y,color:n.color,pass:!!n.pass}));
 }
-/** Dibuja el árbol completo como una lista anidada clicable, dentro de `container`. */
+/**
+ * Distribución del árbol: la continuación principal sigue en la misma fila; una rama baja solo hasta la
+ * primera fila donde no choque con otra rama (así las ramas lejanas entre sí comparten fila).
+ * Devuelve {items:[{node,dx,dy,parent}], occ:Map "dx,dy"->'n'|'v'} relativo a la raíz del bloque.
+ */
+function treeBlock(node){
+  const items = [{node, dx:0, dy:0, parent:-1}];
+  const occ = new Map([['0,0','n']]);
+  node.children.forEach((child,i)=>{
+    const blk = treeBlock(child);
+    let r = 0;
+    if(i>0){
+      r = 1;
+      const hits = ()=>{
+        for(const [k,kind] of blk.occ){
+          const [cx,cy] = k.split(',').map(Number);
+          if(occ.has((cx+1)+','+(cy+r))) return true;
+        }
+        for(let t=1;t<=r;t++){ if(occ.get('0,'+t)==='n') return true; }
+        return false;
+      };
+      while(hits()) r++;
+      for(let t=1;t<=r;t++) if(!occ.has('0,'+t)) occ.set('0,'+t, 'v');   // tramo vertical del conector
+    }
+    const base = items.length;
+    blk.items.forEach(it=>items.push({node:it.node, dx:it.dx+1, dy:it.dy+r, parent: it.parent===-1 ? 0 : it.parent+base}));
+    blk.occ.forEach((kind,k)=>{
+      const [cx,cy] = k.split(',').map(Number);
+      const key = (cx+1)+','+(cy+r);
+      if(!occ.has(key) || kind==='n') occ.set(key, kind);
+    });
+  });
+  return {items, occ};
+}
 /**
  * Árbol horizontal tipo OGS: cada jugada es una piedra con su número, unida a la anterior por una línea.
- * La primera continuación sigue en la misma fila; las demás bajan a una fila nueva con un codo.
  * Se desplaza hacia los lados y arranca centrado en la jugada actual.
  */
 function renderTreeGraph(container, tree, size, currentPath, onPick){
   const CW = 34, RH = 30, R = 11, PAD = 16;
   const nodes = [];           // {node, path, col, row, parent}
   let maxCol = 0;
-  (function layout(node, path, col, row, parent){
-    const me = {node, path, col, row, parent};
-    nodes.push(me);
-    if(col>maxCol) maxCol = col;
-    let used = row;
-    node.children.forEach((child,i)=>{
-      const r = i===0 ? row : used+1;
-      used = layout(child, path.concat([child]), col+1, r, me);
-    });
-    return used;
-  })(tree, [tree], 0, 0, null);
+  treeBlock(tree).items.forEach(it=>{
+    const parent = it.parent>=0 ? nodes[it.parent] : null;
+    nodes.push({node:it.node, path: parent ? parent.path.concat([it.node]) : [tree], col:it.dx, row:it.dy, parent});
+    if(it.dx>maxCol) maxCol = it.dx;
+  });
   const maxRow = Math.max(...nodes.map(n=>n.row));
   const W = PAD*2 + maxCol*CW, H = PAD*2 + maxRow*RH;
   const X = c => PAD + c*CW, Y = r => PAD + r*RH;
@@ -2099,9 +2205,7 @@ function handleCreateClick(x,y){
     const check = checkMoveLegality(stones, st.boardSize, x, y, color, koForbiddenKey);
     if(!check.legal){
       if(check.reason==='occupied') return;
-      showToast(check.reason==='ko'
-        ? 'Jugada ilegal: repetiría la posición de dos jugadas atrás (ko).'
-        : 'Jugada ilegal: esa piedra (o grupo) se quedaría sin libertades (suicidio).', 'warn');
+      showToast(check.reason==='ko' ? 'Jugada ilegal (ko).' : 'Jugada ilegal (suicidio).', 'warn');
       return;
     }
     const newNode = newTreeNode(x,y,color);
@@ -2119,6 +2223,7 @@ function undoLastCreateAction(st){
 
 async function saveCurrentCard(){
   const st = State.create;
+  clearTimeout(createSaveTimer);
   const treeCopy = cloneTree(st.tree);
   const hasCorrect = treeHasVerdict(treeCopy, 'correct');
   if(!hasCorrect && st.setup.length===0 && st.tree.children.length===0) return; // nada que guardar
@@ -2136,9 +2241,9 @@ async function saveCurrentCard(){
     State.prefs = Object.assign({}, State.prefs, {nextNumber: n+1});
   }
   State.prefs = Object.assign({}, State.prefs, {lastTitleTemplate: titleTpl}); // el título con {} se conserva para la siguiente tarjeta
-  const wasEdit = !!st.id;
-  const existing = wasEdit ? State.cards.find(c=>c.id===st.id) : null;
-  const wasEditingDraft = wasEdit && existing && isDraftCard(existing);
+  const wasEdit = !!st.id && !st.createdNew;
+  const existing = st.id ? ((await storeGet('card:'+st.id)) || null) : null;
+  const wasEditingDraft = wasEdit && !!st.wasDraft;
   const card = {
     id: st.id || uid(),
     boardSize: st.boardSize,
@@ -2149,10 +2254,12 @@ async function saveCurrentCard(){
     title,
     note: (st.note||'').trim(),
     flag: !!(existing && existing.flag),
+    doubt: !!(existing && existing.doubt),
     createdAt: (existing && existing.createdAt) || Date.now(),
     srs: existing ? existing.srs || defaultSRS() : defaultSRS(),
   };
   await storeSet('card:'+card.id, card);
+  st.lastSaved = editSignature(st); st.snapshot = st.lastSaved;
   State.cards = await storeListCards();
   saveCreateDefaults(st);
   saveFolderDefault(folder);
@@ -2197,6 +2304,7 @@ async function saveCurrentCard(){
 }
 
 function showToast(msg, type){
+  if((type||'ok')!=='warn') return;   // sin avisos de "guardado", "importado", etc.
   clearTimeout(State.toastTimer);
   State.toast = {msg, type: type||'ok'};
   State.toastTimer = setTimeout(()=>{ State.toast = null; render(); }, 3200);
@@ -2336,7 +2444,7 @@ function renderReview(root){
     return;
   }
 
-  titlebar.appendChild(flagBtn(card));
+  titlebar.appendChild(markBtns(card));
   const uColor = userColorFor(card);
   const p = document.createElement('p'); p.className='hint';
   const limitNote = State.reviewQueueTotal>State.reviewQueue.length ? ` (límite diario · quedan ${State.reviewQueueTotal-State.reviewQueue.length} para otro día)` : '';
@@ -2482,6 +2590,24 @@ function starBtn(on, fn){
   return b;
 }
 function flagBtn(card){ return starBtn(!!card.flag, ()=>toggleFlag(card)); }
+async function toggleDoubt(card){
+  card.doubt = !card.doubt;
+  if(card._orig) card._orig.doubt = card.doubt;
+  await storeSet('card:'+card.id, card._orig || card);
+  render();
+}
+/** Segunda marca «?»: tsumegos cuyo resultado no tengo claro. */
+function doubtBtn(card){
+  const b = document.createElement('button'); b.className = 'star doubt' + (card.doubt ? ' on' : '');
+  b.textContent = '?'; b.title = card.doubt ? 'Duda marcada' : 'Marcar duda';
+  b.addEventListener('click', e=>{ e.stopPropagation(); toggleDoubt(card); });
+  return b;
+}
+function markBtns(card){
+  const w = document.createElement('div'); w.style.cssText='display:flex; gap:6px; flex:none;';
+  w.appendChild(flagBtn(card)); w.appendChild(doubtBtn(card));
+  return w;
+}
 function findNodePath(root, target){
   if(root===target) return [root];
   for(const c of root.children){ const r = findNodePath(c, target); if(r) return [root].concat(r); }
@@ -2507,9 +2633,7 @@ function handleReviewPoint(x,y){
     const koForbiddenKey = step.moveCount>=1 ? step.history[step.moveCount-1] : null;
     const check = checkMoveLegality(step.placed, card.boardSize, x, y, color, koForbiddenKey);
     if(!check.legal){
-      showToast(check.reason==='ko'
-        ? 'Jugada ilegal: repetiría la posición de dos jugadas atrás (ko).'
-        : 'Jugada ilegal: esa piedra (o grupo) se quedaría sin libertades (suicidio).', 'warn');
+      showToast(check.reason==='ko' ? 'Jugada ilegal (ko).' : 'Jugada ilegal (suicidio).', 'warn');
       return;
     }
     recordReviewMove(step, card.boardSize, x, y, color, step.moveCount+1);
@@ -2754,6 +2878,12 @@ function renderList(root){
     flagFilter.textContent = State.listFlagOnly ? `Mostrando marcadas (${flagCount})` : `Mostrar marcadas (${flagCount})`;
     flagFilter.addEventListener('click', ()=>{ State.listFlagOnly = !State.listFlagOnly; render(); });
     draftToggleRow.appendChild(flagFilter);
+    const doubtCount = State.cards.filter(c=>c.doubt).length;
+    const doubtFilter = document.createElement('button');
+    doubtFilter.className = 'btn' + (State.listDoubtOnly ? ' on' : ' ghost');
+    doubtFilter.textContent = State.listDoubtOnly ? `Mostrando dudosas ? (${doubtCount})` : `Mostrar dudosas ? (${doubtCount})`;
+    doubtFilter.addEventListener('click', ()=>{ State.listDoubtOnly = !State.listDoubtOnly; render(); });
+    draftToggleRow.appendChild(doubtFilter);
     root.appendChild(draftToggleRow);
   }
 
@@ -2761,6 +2891,7 @@ function renderList(root){
   const filtered = State.cards.filter(c=>{
     if(State.listDraftsOnly && !isDraftCard(c)) return false;
     if(State.listFlagOnly && !c.flag) return false;
+    if(State.listDoubtOnly && !c.doubt) return false;
     if(State.listFolder==='all'){ /* sin filtro de carpeta */ }
     else if(State.listFolder==='__none__'){ if(c.folder) return false; }
     else if(c.folder!==State.listFolder) return false;
@@ -2770,7 +2901,7 @@ function renderList(root){
 
   if(filtered.length===0){
     const empty = document.createElement('div'); empty.className='empty';
-    empty.innerHTML = `<div class="big">Nada que mostrar</div><div>${searchQuery ? 'Nada coincide con la búsqueda.' : (State.listFlagOnly ? 'No hay tarjetas marcadas con este filtro.' : State.listDraftsOnly ? 'No hay borradores con este filtro.' : 'Ninguna tarjeta coincide con este filtro.')}</div>`;
+    empty.innerHTML = `<div class="big">Nada que mostrar</div><div>${searchQuery ? 'Nada coincide con la búsqueda.' : (State.listDoubtOnly ? 'No hay tarjetas con duda.' : State.listFlagOnly ? 'No hay tarjetas marcadas con este filtro.' : State.listDraftsOnly ? 'No hay borradores con este filtro.' : 'Ninguna tarjeta coincide con este filtro.')}</div>`;
     root.appendChild(empty);
     return;
   }
@@ -2809,7 +2940,7 @@ function renderCardItem(root, card){
   if(card.tree.children[0]) stones.set(card.tree.children[0].x+','+card.tree.children[0].y, card.tree.children[0].color);
   renderBoard(mini, card.boardSize, stones, null, null);
   item.appendChild(mini);
-  item.appendChild(flagBtn(card));
+  { const mb = markBtns(card); mb.style.flexDirection='column'; item.appendChild(mb); }
 
   const info = document.createElement('div'); info.className='info';
   const variantNote = counts.correct>1 ? ` · ${counts.correct} variantes` : '';
@@ -2858,6 +2989,8 @@ function editCard(card){
   };
   State.create.origFolder = card.folder || '';
   State.create.snapshot = editSignature(State.create);
+  State.create.lastSaved = State.create.snapshot;
+  State.create.wasDraft = isDraftCard(card);
 }
 function editSignature(st){
   return JSON.stringify([st.boardSize, st.setup, st.tree, st.marks, st.title, st.note, (st.folder||'').trim()]);
@@ -2870,6 +3003,7 @@ async function folderSiblings(card){
     .sort((a,b)=>naturalCompare(cardSortLabel(a), cardSortLabel(b)) || a.id.localeCompare(b.id));
 }
 async function goNeighborCard(dir){
+  await flushCreateSave();
   const st = State.create;
   if(editSignature(st)!==st.snapshot && !confirm('Hay cambios sin guardar. ¿Descartarlos?')) return;
   const list = await folderSiblings(st);
@@ -2949,21 +3083,26 @@ function migrateTenuki(book){
   if(changed) sortPassLast(book.tree);
   return changed;
 }
-async function loadJosekiBook(){
-  const recs = await storeListColl('joseki');
-  let main = recs.find(r=>r.id==='main');
-  if(!main) main = {id:'main', title:'Josekis', boardSize:19, setup:[], tree:newTreeRoot(), createdAt:Date.now()};
-  // migración: los josekis sueltos de la versión anterior se fusionan en el árbol único
-  const old = recs.filter(r=>r.id!=='main' && r.boardSize===19 && !(r.setup && r.setup.length));
-  if(old.length){
-    old.forEach(r=>mergeTreeInto(main.tree, r.tree, r.title));
-    await storeSet('joseki:main', main);
-    for(const r of old) await storeDelete('joseki:'+r.id);
-  }
-  if(migrateTenuki(main)){ await storeSet('joseki:main', main); }
-  return main;
+function newJosekiRecord(title, folder){
+  return {id:'j'+uid(), title:title||'', boardSize:19, setup:[], tree:newTreeRoot(), createdAt:Date.now(), folder:folder||''};
 }
-async function saveBook(){ await storeSet('joseki:main', State.book); }
+/** Carga todos los josekis (uno por archivo). El árbol único de versiones anteriores ('main') pasa a ser un archivo más. */
+async function loadJosekiList(){
+  const recs = await storeListColl('joseki');
+  for(const r of recs){
+    if(r.folder===undefined) r.folder = '';
+    if(!r.title) r.title = r.id==='main' ? 'Josekis' : 'Joseki';
+    if(migrateTenuki(r)) await storeSet('joseki:'+r.id, r);
+  }
+  State.lists.joseki = recs;
+  return recs;
+}
+async function saveBook(){ if(State.book) await storeSet('joseki:'+State.book.id, State.book); }
+/** Guarda el joseki abierto, salvo que sea uno nuevo todavía vacío (no deja archivos en blanco). */
+async function saveBookIfMeaningful(){
+  const b = State.book; if(!b) return;
+  if((State.lists.joseki||[]).some(r=>r.id===b.id) || b.tree.children.length || (b.title||'').trim()) await saveBook();
+}
 let bookTimer = null;
 function bookChanged(){ clearTimeout(bookTimer); bookTimer = setTimeout(saveBook, 400); }
 
@@ -2985,7 +3124,7 @@ function bookBody(node){
   return o;
 }
 function bookToSGF(book){
-  return `(;GM[1]FF[4]CA[UTF-8]SZ[${book.boardSize}]` + bookNodeProps(book.tree) + bookBody(book.tree) + ')';
+  return `(;GM[1]FF[4]CA[UTF-8]SZ[${book.boardSize}]` + (book.title ? `GN[${sgfText(book.title)}]` : '') + bookNodeProps(book.tree) + bookBody(book.tree) + ')';
 }
 /** Fusiona un SGF (con sus variantes, comentarios y pérdidas) en el árbol. Devuelve jugadas nuevas, o null si no es compatible. */
 function mergeSGFIntoBook(text, book){
@@ -3025,29 +3164,71 @@ function mergeSGFIntoBook(text, book){
   return added;
 }
 async function exportBook(){
-  if(!State.book) State.book = await loadJosekiBook();
-  if(!State.book.tree.children.length){ showToast('La biblioteca está vacía.', 'warn'); render(); return; }
-  downloadText('josekis.sgf', bookToSGF(State.book));
+  const book = State.book;
+  if(!book || !book.tree.children.length) return;
+  downloadText((book.title||'joseki').replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', bookToSGF(book));
+}
+function currentJosekiFolder(){
+  const f = State.collFolder;
+  return (f && f!=='all' && f!=='__none__') ? f : '';
+}
+/** entries: [{name, text, folder}] — cada SGF pasa a ser un joseki con su carpeta. */
+async function importJosekiEntries(entries){
+  let ok = 0, skipped = 0, bad = 0;
+  for(const e of entries){
+    try{
+      const rec = newJosekiRecord('', e.folder||'');
+      const n = mergeSGFIntoBook(e.text, rec);
+      if(n===null){ skipped++; continue; }
+      const head = (parseSGF(e.text).sequence[0]) || {};
+      rec.title = (head.GN && head.GN[0]) || e.name.replace(/^.*\//,'').replace(/\.sgf$/i,'');
+      await storeSet('joseki:'+rec.id, rec); ok++;
+    }catch(err){ bad++; }
+  }
+  await loadJosekiList();
+  if(skipped||bad) showToast(`Importados ${ok}. Omitidos: ${skipped} (tamaño o piedras iniciales), ilegibles: ${bad}.`, 'warn');
+  render();
 }
 function pickJosekiFiles(){
-  const file = document.createElement('input'); file.type='file'; file.accept='.sgf'; file.multiple = true;
+  const file = document.createElement('input'); file.type='file'; file.accept='.sgf,.zip,application/zip'; file.multiple = true;
   file.addEventListener('change', async ()=>{
-    if(!State.book) State.book = await loadJosekiBook();
-    let added = 0, skipped = 0, bad = 0;
+    const entries = [], dflt = currentJosekiFolder();
     for(const f of Array.from(file.files||[])){
       try{
-        const n = mergeSGFIntoBook(await f.text(), State.book);
-        if(n===null) skipped++; else added += n;
-      }catch(e){ bad++; }
+        if(/\.zip$/i.test(f.name)){
+          readZip(await f.arrayBuffer()).filter(z=>/\.sgf$/i.test(z.name)).forEach(z=>{
+            const parts = z.name.split('/'); entries.push({name:parts[parts.length-1], text:z.text, folder: parts.slice(0,-1).join(' / ') || dflt});
+          });
+        } else entries.push({name:f.name, text:await f.text(), folder:dflt});
+      }catch(err){ entries.push({name:f.name, text:'', folder:dflt}); }
     }
-    await saveBook();
-    State.bk = null;
-    const extra = (skipped||bad) ? ` (${skipped} omitido(s) por tamaño o piedras iniciales; ${bad} ilegible(s))` : '';
-    showToast(`Se añadieron ${added} jugadas.${extra}`, (skipped||bad)?'warn':'ok');
-    render();
+    await importJosekiEntries(entries);
   });
   file.click();
 }
+/** Elige una carpeta del dispositivo: sus subcarpetas se convierten en carpetas de la biblioteca. */
+function pickJosekiFolder(){
+  const file = document.createElement('input'); file.type='file'; file.multiple = true;
+  file.setAttribute('webkitdirectory',''); file.setAttribute('directory','');
+  file.addEventListener('change', async ()=>{
+    const entries = [];
+    for(const f of Array.from(file.files||[])){
+      if(!/\.sgf$/i.test(f.name)) continue;
+      const parts = (f.webkitRelativePath || f.name).split('/');
+      entries.push({name:f.name, text:await f.text(), folder: parts.slice(0,-1).join(' / ')});
+    }
+    await importJosekiEntries(entries);
+  });
+  file.click();
+}
+function openJosekiFile(rec){
+  State.book = rec; State.bk = null; State.jpSrc = null; State.jp = null;
+  render();
+}
+function newJosekiFile(){
+  openJosekiFile(newJosekiRecord('', currentJosekiFolder()));
+}
+function countNodes(node){ return node.children.reduce((n,c)=>n+countNodes(c), 0) + (node.x!==null ? 1 : 0); }
 
 // --- utilidades de árbol ---
 function bookFirstColor(book){ const c = book.tree.children.find(c=>!c.pass) || book.tree.children[0]; return (c && c.color) || 'B'; }
@@ -3077,7 +3258,7 @@ function treeClick(h, x, y, o){
   const check = checkMoveLegality(stones, o.size, x, y, color, koKey);
   if(!check.legal){
     if(check.reason==='occupied') return;
-    showToast(check.reason==='ko' ? 'Jugada ilegal: ko.' : 'Jugada ilegal: suicidio.', 'warn');
+    showToast(check.reason==='ko' ? 'Jugada ilegal (ko).' : 'Jugada ilegal (suicidio).', 'warn');
     render(); return;
   }
   const node = newTreeNode(x,y,color);
@@ -3167,6 +3348,23 @@ function bkState(){
 function renderBook(root){
   const book = State.book, bk = bkState();
   appendToast(root);
+  {
+    const top = document.createElement('div'); top.className='btnrow'; top.style.marginTop='0';
+    const back = document.createElement('button'); back.className='btn ghost small'; back.textContent='← Biblioteca';
+    back.addEventListener('click', async ()=>{
+      clearTimeout(bookTimer);
+      await saveBookIfMeaningful();
+      State.book = null; State.bk = null; State.jpSrc = null; State.jp = null;
+      await loadJosekiList();
+      render();
+    });
+    top.appendChild(back); root.appendChild(top);
+    const tf = document.createElement('div'); tf.className='field';
+    const ti = document.createElement('input'); ti.type='text'; ti.value = book.title||''; ti.placeholder='Nombre del joseki';
+    ti.addEventListener('input', e=>{ book.title = e.target.value; bookChanged(); });
+    tf.appendChild(ti); root.appendChild(tf);
+    root.appendChild(folderInputField(book.folder||'', v=>{ book.folder = v.trim(); bookChanged(); }, (State.lists.joseki||[]).map(r=>r.folder), 'joseki-folder-suggestions'));
+  }
   const cur = bk.path[bk.path.length-1], total = bk.path.length-1;
   const stones = bookStones(book, bk.path);
   const turn = bookTurn(book, bk.path);
@@ -3223,8 +3421,20 @@ function renderBook(root){
     root.appendChild(lc);
   }
   const io = document.createElement('div'); io.className='btnrow'; io.style.marginTop='18px';
-  const impBtn = document.createElement('button'); impBtn.className='btn ghost small'; impBtn.textContent='Importar .sgf';
-  impBtn.addEventListener('click', pickJosekiFiles);
+  const impBtn = document.createElement('button'); impBtn.className='btn ghost small'; impBtn.textContent='Importar a este joseki';
+  impBtn.addEventListener('click', ()=>{
+    const file = document.createElement('input'); file.type='file'; file.accept='.sgf'; file.multiple = true;
+    file.addEventListener('change', async ()=>{
+      let skipped = 0, bad = 0;
+      for(const f of Array.from(file.files||[])){
+        try{ if(mergeSGFIntoBook(await f.text(), book)===null) skipped++; }catch(e){ bad++; }
+      }
+      await saveBook(); State.bk = null;
+      if(skipped||bad) showToast(`${skipped} omitido(s) por tamaño o piedras iniciales; ${bad} ilegible(s).`, 'warn');
+      render();
+    });
+    file.click();
+  });
   const expBtn = document.createElement('button'); expBtn.className='btn ghost small'; expBtn.textContent='Exportar .sgf';
   expBtn.disabled = !book.tree.children.length;
   expBtn.addEventListener('click', exportBook);
@@ -3239,8 +3449,31 @@ function jpMakeView(b){
   if(tfIsIdentity(t)) return b;
   return {boardSize:b.boardSize, tree:tfTree(b.tree, t, b.boardSize)};
 }
+function mergeForPractice(t, src, rec){
+  src.children.forEach(sc=>{
+    let tc = t.children.find(c=>c.x===sc.x && c.y===sc.y && c.color===sc.color);
+    if(!tc){ tc = newTreeNode(sc.x, sc.y, sc.color); if(sc.pass) tc.pass = true; addChildSorted(t, tc); tc._src = sc; tc._rec = rec; }
+    if(sc.comment && !tc.comment) tc.comment = sc.comment;
+    if(sc.loss!=null && tc.loss==null) tc.loss = sc.loss;
+    if(sc.flag) tc.flag = true;
+    if(sc.marks){ tc.marks = tc.marks||[]; sc.marks.forEach(m=>{ if(!tc.marks.some(q=>q.x===m.x&&q.y===m.y)) tc.marks.push(m); }); }
+    mergeForPractice(tc, sc, rec);
+  });
+}
+/** Árbol de práctica según la selección: todo, una carpeta o un archivo. Con varios archivos se combinan en un solo árbol. */
+function jpBuildSource(){
+  const recs = (State.lists.joseki||[]).filter(r=>r.tree.children.length);
+  const sel = State.jpSel || 'all';
+  let chosen = recs;
+  if(sel.startsWith('folder:')) chosen = recs.filter(r=>(r.folder||'')===sel.slice(7));
+  else if(sel.startsWith('file:')) chosen = recs.filter(r=>r.id===sel.slice(5));
+  if(chosen.length===1) return {boardSize:19, tree:chosen[0].tree, rec:chosen[0]};
+  const tree = newTreeRoot();
+  chosen.forEach(r=>mergeForPractice(tree, r.tree, r));
+  return {boardSize:19, tree};
+}
 function jpState(){
-  const b = State.book;
+  const b = State.jpSrc;
   if(!State.jp || State.jp.tree!==b.tree){
     State.jp = {tree:b.tree, view:jpMakeView(b), path:[], side:null, pending:null, lastTap:0, panel:null, msg:'', notes:[], showOptions:false, busy:false, mistakes:0};
     State.jp.path = [State.jp.view.tree];
@@ -3348,13 +3581,34 @@ function jpConfirm(){
   jpMachine();
 }
 function renderBookPractice(root){
-  const src = State.book, js = jpState(), book = js.view;
   appendToast(root);
+  const recs = (State.lists.joseki||[]).filter(r=>r.tree.children.length);
+  if(recs.length>1){
+    const f = document.createElement('div'); f.className='field';
+    f.innerHTML = '<label>Practicar</label>';
+    const sel = document.createElement('select');
+    const add = (parent, v, l)=>{ const o=document.createElement('option'); o.value=v; o.textContent=l; parent.appendChild(o); };
+    add(sel, 'all', 'Toda la biblioteca');
+    const folders = Array.from(new Set(recs.map(r=>r.folder||''))).sort((a,b)=> a===''?1 : b===''?-1 : naturalCompare(a,b));
+    if(folders.length>1 || folders[0]!==''){
+      const og = document.createElement('optgroup'); og.label = 'Carpetas';
+      folders.forEach(n=>add(og, 'folder:'+n, n || 'Sin carpeta')); sel.appendChild(og);
+    }
+    const og2 = document.createElement('optgroup'); og2.label = 'Archivos';
+    recs.slice().sort((a,b)=>naturalCompare(a.title||'', b.title||'')).forEach(r=>add(og2, 'file:'+r.id, r.title||'(sin título)')); sel.appendChild(og2);
+    sel.value = State.jpSel || 'all';
+    if(sel.value!==(State.jpSel||'all')) { State.jpSel = 'all'; sel.value = 'all'; }
+    sel.addEventListener('change', ()=>{ State.jpSel = sel.value; State.jpSrc = null; State.jp = null; render(); });
+    f.appendChild(sel); root.appendChild(f);
+  }
+  if(!State.jpSrc) State.jpSrc = jpBuildSource();
+  const src = State.jpSrc;
   if(!src.tree.children.length){
     const empty = document.createElement('div'); empty.className='empty';
     empty.innerHTML = '<div class="big">Tu biblioteca está vacía</div><div>Agrega josekis en Biblioteca.</div>';
     root.appendChild(empty); return;
   }
+  const js = jpState(), book = js.view;
   const sideField = document.createElement('div'); sideField.className='field';
   sideField.innerHTML = '<label>Juego con</label>';
   const tg = document.createElement('div'); tg.className='toggle-group';
@@ -3379,7 +3633,11 @@ function renderBookPractice(root){
   status.innerHTML = `<span>${st}${js.msg ? ' · <span class="msg bad">'+esc(js.msg)+'</span>' : ''}</span>`;
   if(total>0){
     const last = js.path[js.path.length-1], orig = last._src || last;
-    status.appendChild(starBtn(!!orig.flag, ()=>{ if(orig.flag) delete orig.flag; else orig.flag = true; saveBook(); render(); }));
+    status.appendChild(starBtn(!!orig.flag, ()=>{
+      if(orig.flag) delete orig.flag; else orig.flag = true;
+      const rec = last._rec || src.rec; if(rec) storeSet('joseki:'+rec.id, rec);
+      render();
+    }));
   }
   root.appendChild(status);
 
@@ -3450,7 +3708,7 @@ function renderBookPractice(root){
 /* ----------------------- Colecciones: partidas y josekis (fuera del repaso) ----------------------- */
 const COLL = {
   game:   {prefix:'game:',   title:'Partidas',  one:'partida', hint:'Kifus para estudiar o revisar. No entran al repaso espaciado.', idp:'g'},
-  joseki: {prefix:'joseki:', title:'Biblioteca de josekis', one:'joseki', hint:'Tus josekis con sus variantes. Alimentan la práctica; no entran al repaso espaciado.', idp:'j'},
+  joseki: {prefix:'joseki:', title:'Biblioteca de josekis', one:'joseki', hint:'', idp:'j'},
 };
 async function storeListColl(kind){
   const prefix = COLL[kind].prefix;
@@ -3474,6 +3732,7 @@ function gameMetaLine(g){
   const i = g.info || {};
   const pl = (i.pb||i.pw) ? `${esc(i.pb||'?')}${i.br?' ('+esc(i.br)+')':''} vs ${esc(i.pw||'?')}${i.wr?' ('+esc(i.wr)+')':''} · ` : '';
   const dt = i.date ? esc(i.date)+' · ' : '';
+  if(!g.info) return `${g.boardSize}×${g.boardSize} · ${countNodes(g.tree)} jugadas`;
   return `${pl}${dt}${g.boardSize}×${g.boardSize} · ${gameMainLength(g.tree)} jugadas`;
 }
 function newInfo(){ return {pb:'', pw:'', br:'', wr:'', komi:'6.5', handicap:0, date:todayISO(), result:''}; }
@@ -3503,9 +3762,9 @@ function openItem(g, kind){
   render();
 }
 let gameSaveTimer = null;
-/** Una partida que ya existe se guarda sola poco después de cada cambio (como la biblioteca de josekis). */
+/** Las partidas se guardan solas poco después de cada cambio. */
 function gameAutosave(){
-  const gm = State.game; if(!gm || !gm.saved) return;
+  const gm = State.game; if(!gm) return;
   clearTimeout(gameSaveTimer);
   gameSaveTimer = setTimeout(()=>{ if(State.game===gm) saveItem(true); }, 700);
 }
@@ -3537,9 +3796,43 @@ function gameStep(d){
   }
   render();
 }
+function gameOpts(gm){
+  return {size:gm.boardSize, setup:gm.setup, color:()=>gameTurn(gm), onChange:()=>{ gm.dirty = true; gameAutosave(); }};
+}
+/** Ventana de tablero (9×9 en 19×19) centrada en el punto tocado, ajustada a los bordes. */
+function zoomBoxAround(size, x, y){
+  const win = Math.min(size, size>=19 ? 9 : 7);
+  const lo = v=>Math.max(0, Math.min(size-win, v-Math.floor(win/2)));
+  const minX = lo(x), minY = lo(y);
+  return {minX, maxX:minX+win-1, minY, maxY:minY+win-1};
+}
+function gameClearPending(){ const gm = State.game; if(gm){ gm.pending = null; gm.zoomBox = null; } }
+/** Primer toque: selecciona y acerca el tablero a esa zona. Tocar el mismo punto (o «Confirmar») juega la jugada. */
 function gameClick(x,y){
   const gm = State.game; if(!gm) return;
-  treeClick(gm, x, y, {size:gm.boardSize, setup:gm.setup, color:()=>gameTurn(gm), onChange:()=>{ gm.dirty = true; gameAutosave(); }});
+  if(gm.mode==='marks'){ gameClearPending(); treeClick(gm, x, y, gameOpts(gm)); return; }
+  const cur = gm.path[gm.path.length-1];
+  if(cur.children.some(c=>c.x===x && c.y===y)){ gameClearPending(); treeClick(gm, x, y, gameOpts(gm)); return; }   // seguir una variante existente
+  if(gameStones(gm).has(x+','+y)) return;
+  if(gm.pending && gm.pending.x===x && gm.pending.y===y){ gameConfirm(); return; }
+  gm.pending = {x,y}; gm.pendingAt = cur;
+  if(!gm.zoomBox) gm.zoomBox = zoomBoxAround(gm.boardSize, x, y);
+  render();
+}
+function gameConfirm(){
+  const gm = State.game; if(!gm || !gm.pending) return;
+  const {x,y} = gm.pending;
+  gameClearPending();
+  treeClick(gm, x, y, gameOpts(gm));
+}
+function gamePass(){
+  const gm = State.game; if(!gm) return;
+  gameClearPending();
+  const cur = gm.path[gm.path.length-1];
+  let p = passChild(cur);
+  if(!p){ p = newPassNode(gameTurn(gm)); addChildSorted(cur, p); gm.dirty = true; gameAutosave(); }
+  gm.path = gm.path.concat([p]);
+  render();
 }
 function cardFromGamePosition(){
   const gm = State.game;
@@ -3563,7 +3856,7 @@ document.addEventListener('keydown', e=>{
 
 function gameBody(node){
   let o = '';
-  if(node.x!==null) o += `;${node.color}[${coordChar(node.x)}${coordChar(node.y)}]`;
+  if(node.x!==null) o += `;${node.color}[${node.pass ? '' : coordChar(node.x)+coordChar(node.y)}]`;
   if(node.comment) o += `C[${sgfText(node.comment)}]`;
   o += marksToSGF(node.marks);
   if(node.children.length===1) o += gameBody(node.children[0]);
@@ -3603,10 +3896,11 @@ function parseGameSGF(text){
     g.sequence.forEach((props, i)=>{
       const mv = props.B ? {c:'B', v:props.B[0]} : (props.W ? {c:'W', v:props.W[0]} : null);
       if(mv){
-        const q = sgfXY(mv.v);
-        if(!q || q.x>=bs || q.y>=bs) return;
-        let child = cur.children.find(c=>c.x===q.x && c.y===q.y && c.color===mv.c);
-        if(!child){ child = newTreeNode(q.x,q.y,mv.c); cur.children.push(child); }
+        const isPass = mv.v==='' || (mv.v==='tt' && bs<=19);
+        const q = isPass ? null : sgfXY(mv.v);
+        if(!isPass && (!q || q.x>=bs || q.y>=bs)) return;
+        let child = isPass ? cur.children.find(c=>c.pass && c.color===mv.c) : cur.children.find(c=>c.x===q.x && c.y===q.y && c.color===mv.c);
+        if(!child){ child = isPass ? newPassNode(mv.c) : newTreeNode(q.x,q.y,mv.c); addChildSorted(cur, child); }
         cur = child;
         if(props.C && props.C[0] && !cur.comment) cur.comment = props.C[0];
         mergeMarks(cur, marksFromProps(props, bs));
@@ -3647,8 +3941,6 @@ function renderCollection(root, kind){
   const h = document.createElement('h2'); h.className='section-title'; h.textContent = C.title;
   root.appendChild(h);
   appendToast(root);
-  const hint = document.createElement('p'); hint.className='hint'; hint.textContent = C.hint;
-  root.appendChild(hint);
 
   const sf = document.createElement('div'); sf.className='field';
   const si = document.createElement('input'); si.type='text'; si.id='coll-search'; si.placeholder='Buscar por título, jugador…'; si.value = State.search[kind]||'';
@@ -3695,7 +3987,7 @@ function renderCollection(root, kind){
     && (cf==='all' || (cf==='__none__' ? !g.folder : g.folder===cf))).sort(cmp);
   if(!list.length){
     const empty = document.createElement('div'); empty.className='empty';
-    empty.innerHTML = items.length ? '<div class="big">Nada que mostrar</div>' : `<div class="big">Aún no hay ${kind==='game'?'partidas':'josekis'}</div><div>Usa «Nueva» en el submenú o importa un .sgf abajo.</div>`;
+    empty.innerHTML = items.length ? '<div class="big">Nada que mostrar</div>' : `<div class="big">Aún no hay ${kind==='game'?'partidas':'josekis'}</div>`;
     root.appendChild(empty); appendImportRow(root, kind); return;
   }
   const renderOne = g=>{
@@ -3710,9 +4002,9 @@ function renderCollection(root, kind){
     item.appendChild(info);
     const actions = document.createElement('div'); actions.className='actions';
     const openBtn = document.createElement('button'); openBtn.className='btn pine small'; openBtn.textContent='Abrir';
-    openBtn.addEventListener('click', ()=>openItem(g, kind));
+    openBtn.addEventListener('click', ()=>{ if(kind==='joseki') openJosekiFile(g); else openItem(g, kind); });
     const sgfBtn = document.createElement('button'); sgfBtn.className='btn ghost small'; sgfBtn.textContent='.sgf';
-    sgfBtn.addEventListener('click', ()=>downloadText((g.title||C.one).replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', gToSgf(g)));
+    sgfBtn.addEventListener('click', ()=>downloadText((g.title||C.one).replace(/[^a-z0-9]+/gi,'_').toLowerCase()+'.sgf', kind==='joseki' ? bookToSGF(g) : gToSgf(g)));
     const delBtn = document.createElement('button'); delBtn.className='btn ghost small'; delBtn.textContent='Eliminar';
     delBtn.addEventListener('click', async ()=>{
       if(!confirm('¿Eliminar?')) return;
@@ -3738,9 +4030,18 @@ function renderCollection(root, kind){
 }
 function appendImportRow(root, kind){
   const io = document.createElement('div'); io.className='btnrow'; io.style.marginTop='18px';
-  const b = document.createElement('button'); b.className='btn ghost small'; b.textContent='Importar .sgf';
+  if(kind==='joseki'){
+    const nb = document.createElement('button'); nb.className='btn pine small'; nb.textContent='+ Nuevo';
+    nb.addEventListener('click', newJosekiFile); io.appendChild(nb);
+  }
+  const b = document.createElement('button'); b.className='btn ghost small'; b.textContent = kind==='joseki' ? 'Importar archivos' : 'Importar .sgf';
   b.addEventListener('click', ()=>pickSgfFiles(kind));
-  io.appendChild(b); root.appendChild(io);
+  io.appendChild(b);
+  if(kind==='joseki'){
+    const fb = document.createElement('button'); fb.className='btn ghost small'; fb.textContent='Importar carpeta';
+    fb.addEventListener('click', pickJosekiFolder); io.appendChild(fb);
+  }
+  root.appendChild(io);
 }
 
 function gameInfoPanel(gm){
@@ -3777,12 +4078,13 @@ function gameInfoPanel(gm){
 }
 function renderItemEditor(root){
   const gm = State.game, C = COLL[gm.kind];
+  if(gm.pending && (gm.pendingAt!==gm.path[gm.path.length-1] || gm.mode==='marks')){ gm.pending = null; gm.zoomBox = null; }
   appendToast(root);
   const top = document.createElement('div'); top.className='btnrow'; top.style.marginTop='0';
   const back = document.createElement('button'); back.className='btn ghost small'; back.textContent='← '+C.title;
   back.addEventListener('click', async ()=>{
-    if(gm.dirty && gm.saved){ clearTimeout(gameSaveTimer); await saveItem(true); }
-    else if(gm.dirty && !confirm('Hay cambios sin guardar. ¿Salir sin guardar?')) return;
+    clearTimeout(gameSaveTimer);
+    if(gm.dirty) await saveItem(true);
     State.game = null; State.lists[gm.kind] = await storeListColl(gm.kind); render();
   });
   top.appendChild(back);
@@ -3807,25 +4109,34 @@ function renderItemEditor(root){
   const boardWrap = document.createElement('div'); boardWrap.className='board-wrap';
   root.appendChild(boardWrap);
   const markers = new Map();
-  if(total>0){ const m = gm.path[gm.path.length-1]; markers.set(m.x+','+m.y, {type:'last'}); }
+  if(total>0){ const m = gm.path[gm.path.length-1]; if(!m.pass) markers.set(m.x+','+m.y, {type:'last'}); }
+  if(gm.pending) markers.set(gm.pending.x+','+gm.pending.y, {type:'ghost', color:tc});
   const showCoords = !!(State.prefs && State.prefs.showCoords);
-  renderBoard(boardWrap, gm.boardSize, stones, gm.edit ? (x,y)=>gameClick(x,y) : null, markers, gm.path[gm.path.length-1].marks||null, null, null, showCoords);
+  renderBoard(boardWrap, gm.boardSize, stones, gm.edit ? (x,y)=>gameClick(x,y) : null, markers, gm.path[gm.path.length-1].marks||null, null, gm.zoomBox||null, showCoords);
 
   const cur = gm.path[gm.path.length-1];
+  if(gm.pending){
+    const pr = document.createElement('div'); pr.className='btnrow fill';
+    const ok = document.createElement('button'); ok.className='btn pine'; ok.textContent='Confirmar jugada';
+    ok.addEventListener('click', gameConfirm);
+    const no = document.createElement('button'); no.className='btn ghost'; no.textContent='Cancelar';
+    no.addEventListener('click', ()=>{ gameClearPending(); render(); });
+    pr.appendChild(ok); pr.appendChild(no); root.appendChild(pr);
+  }
   root.appendChild(treeNavRow(gm, gm.tree));
 
   root.appendChild(markToolbar(gm));
 
   const acts = document.createElement('div'); acts.className='btnrow fill';
-  const saveBtn = document.createElement('button'); saveBtn.className='btn pine small'; saveBtn.textContent='Guardar';
-  saveBtn.addEventListener('click', saveItem);
+  const passBtn = document.createElement('button'); passBtn.className='btn small ' + (passChild(cur) ? 'on' : 'ghost'); passBtn.textContent='Pasar';
+  passBtn.addEventListener('click', gamePass);
   const delBtn = deleteMoveButton(gm, ()=>{ gm.dirty = true; gameAutosave(); });
-  acts.appendChild(saveBtn); acts.appendChild(delBtn);
+  acts.appendChild(passBtn); acts.appendChild(delBtn);
   root.appendChild(acts);
 
   // comentario de la jugada actual
   {
-    const lbl = total>0 ? `Comentario · jugada ${total} (${coordLabel(cur.x,cur.y,gm.boardSize)})` : 'Comentario inicial';
+    const lbl = total>0 ? `Comentario · jugada ${total} (${cur.pass ? 'pasar' : coordLabel(cur.x,cur.y,gm.boardSize)})` : 'Comentario inicial';
     const f = document.createElement('div'); f.className='field';
     f.innerHTML = `<label>${lbl}</label>`;
     const t = document.createElement('textarea'); t.style.minHeight='54px'; t.value = cur.comment||''; t.placeholder = 'Comentario de esta jugada';

@@ -4,9 +4,9 @@ App de una sola carpeta, sin backend ni dependencias externas. Todo se guarda en
 
 ## Secciones
 
-- **Tsumegos** — *Repasar* (repetición espaciada con límite diario), *Libre* (resolución libre en orden alfabético o aleatorio, con anterior/siguiente e «Ir a», sin límite y sin afectar el calendario), *Tarjetas* (carpetas, marcas, editar) y *Crear* (tablero, árbol de variantes, ramas correcta/incorrecta, importar imagen/SGF).
-- **Partidas** — *Mis partidas*, *Nueva* e *Importar* (SGF). La lista de partidas tiene búsqueda (título o jugador), carpetas, orden y filtro de marcadas. Cada partida (siempre editable, con ★ de marca y los datos en un desplegable bajo el tablero) guarda título, jugadores (con color), kyu/dan, komi, handicap, fecha, resultado y un comentario por jugada. Visor con árbol horizontal; no entran en el repaso.
-- **Josekis** — *Biblioteca* (un solo árbol SGF; opciones A, B, C…, pérdida de puntos y comentario por jugada, botón «+ Tenuki» (pasar): crea una rama donde quien juega pasa y sigues con la secuencia local que resulta, «Tenuki» la abre si ya existe, se guarda como `;B[]`/`;W[]` en el SGF; importar/exportar al final) y *Practicar* (la máquina responde al azar entre tus ramas).
+- **Tsumegos** — *Repasar* (repetición espaciada con límite diario), *Libre* (resolución libre en orden alfabético o aleatorio, con anterior/siguiente e «Ir a», sin límite y sin afectar el calendario), *Tarjetas* (carpetas, marcas ★ y ?, editar) y *Crear* (tablero, árbol de variantes, ramas correcta/incorrecta, importar imagen/SGF).
+- **Partidas** — *Mis partidas*, *Nueva* e *Importar* (SGF). La lista de partidas tiene búsqueda (título o jugador), carpetas, orden y filtro de marcadas. Cada partida (siempre editable, con ★ de marca y los datos en un desplegable bajo el tablero) guarda título, jugadores (con color), kyu/dan, komi, handicap, fecha, resultado y un comentario por jugada. Botón **Pasar** en el registro; al tocar un punto el tablero se acerca a esa zona y se confirma con un segundo toque en el mismo punto (o «Confirmar jugada»; «Cancelar» lo deshace). Visor con árbol horizontal, que solo baja a otra fila cuando una rama chocaría con otra; no entran en el repaso.
+- **Josekis** — *Biblioteca* (un archivo por joseki, agrupados en carpetas; importa varios .sgf, un .zip o una carpeta del dispositivo — sus subcarpetas pasan a ser carpetas; cada joseki es un árbol SGF con opciones A, B, C…, pérdida de puntos y comentario por jugada, botón «+ Tenuki» (pasar): crea una rama donde quien juega pasa y sigues con la secuencia local que resulta, «Tenuki» la abre si ya existe, se guarda como `;B[]`/`;W[]` en el SGF; exportar .sgf por archivo) y *Practicar* (puedes practicar toda la biblioteca, una carpeta o un archivo; la máquina responde al azar entre tus ramas).
 - **Ajustes** — recorte automático, coordenadas, límite diario, almacenamiento y variantes.
 
 ## Jugar en repaso y práctica
@@ -41,6 +41,10 @@ icons/apple-touch-icon.png
 ## Actualizar la app más adelante
 
 Cada vez que subas cambios nuevos a `index.html`, sube también un cambio a `service-worker.js` — basta con subir el número de la constante `VERSION` al principio del archivo (por ejemplo de `'kifu-v1'` a `'kifu-v2'`). Sin ese cambio, el service worker puede seguir sirviendo la versión vieja desde caché por un tiempo.
+
+## Guardado automático
+
+Tarjetas, partidas y josekis se guardan solos al editar; no hay botón de guardar obligatorio (en tarjetas, «Guardar y siguiente» solo sirve para pasar a la siguiente). Los avisos de «guardado» e importación ya no aparecen; solo se muestran los errores (jugada ilegal, archivo ilegible).
 
 ## Respaldo
 
