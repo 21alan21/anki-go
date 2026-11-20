@@ -5,13 +5,23 @@ App de una sola carpeta, sin backend ni dependencias externas. Todo se guarda en
 ## Secciones
 
 - **Tsumegos** — *Repasar* (repetición espaciada con límite diario), *Libre* (resolución libre en orden alfabético o aleatorio, con anterior/siguiente e «Ir a», sin límite y sin afectar el calendario), *Tarjetas* (carpetas, marcas ★ y ?, editar) y *Crear* (tablero, árbol de variantes, ramas correcta/incorrecta, importar imagen/SGF).
-- **Partidas** — *Mis partidas*, *Nueva* e *Importar* (SGF). La lista de partidas tiene búsqueda (título o jugador), carpetas, orden y filtro de marcadas. Cada partida (siempre editable, con ★ de marca y los datos en un desplegable bajo el tablero) guarda título, jugadores (con color), kyu/dan, komi, handicap, fecha, resultado y un comentario por jugada. Botón **Pasar** en el registro; al tocar un punto el tablero se acerca a esa zona y se confirma con un segundo toque en el mismo punto (o «Confirmar jugada»; «Cancelar» lo deshace). Visor con árbol horizontal, que solo baja a otra fila cuando una rama chocaría con otra; no entran en el repaso.
+- **Partidas** — *Mis partidas*, *Nueva* e *Importar* (SGF). La lista de partidas tiene búsqueda (título o jugador), carpetas, orden y filtro de marcadas. Cada partida (tablero 9×9, 13×13 o 19×19 desde el desplegable de datos; siempre editable, con ★ de marca y los datos en un desplegable bajo el tablero) guarda título, jugadores (con color), kyu/dan, komi, handicap, fecha, resultado y un comentario por jugada. Botón **Pasar** en el registro; al tocar un punto el tablero se acerca a esa zona y se confirma con un segundo toque en el mismo punto (o «Confirmar jugada»; «Cancelar» lo deshace). Visor con árbol horizontal, que solo baja a otra fila cuando una rama chocaría con otra; no entran en el repaso.
 - **Josekis** — *Biblioteca* (un archivo por joseki, agrupados en carpetas; importa varios .sgf, un .zip o una carpeta del dispositivo — sus subcarpetas pasan a ser carpetas; cada joseki es un árbol SGF con opciones A, B, C…, pérdida de puntos y comentario por jugada, botón «+ Tenuki» (pasar): crea una rama donde quien juega pasa y sigues con la secuencia local que resulta, «Tenuki» la abre si ya existe, se guarda como `;B[]`/`;W[]` en el SGF; exportar .sgf por archivo) y *Practicar* (puedes practicar toda la biblioteca, una carpeta o un archivo; la máquina responde al azar entre tus ramas).
-- **Ajustes** — recorte automático, coordenadas, límite diario, almacenamiento y variantes.
+- **Ajustes** — submenú de tres secciones: *Repaso* (límite diario, variantes de tsumegos y josekis, carpetas a estudiar, reiniciar fechas y repasos con confirmación y numeración automática de títulos), *Tablero* (recorte, coordenadas, entrada de jugadas y valores por defecto al crear: tamaño, piedra inicial y primer turno de los tsumegos, y tamaño de las partidas) y *Datos* (almacenamiento, respaldo, importar/exportar, copiar y pegar). Las acciones sin cambio visible muestran un aviso breve arriba.
 
 ## Jugar en repaso y práctica
 
-Toca un punto para seleccionarlo; doble toque (o **Confirmar jugada**) para jugarlo. En josekis: **Tenuki** pasa: sigue la rama de tenuki de tu biblioteca (si no existe cuenta como fallo), **Ver opciones** muestra las letras, En partidas y josekis las marcas (triángulo, cuadrado, letra y número) usan el mismo selector que el editor de tsumegos y se guardan por posición en el SGF (TR/SQ/LB). Partidas, josekis y el editor de tsumegos muestran las últimas 10 jugadas sobre el tablero (‹ muestra el resto). Tocar fuera del tablero deshace la jugada seleccionada. En josekis puedes marcar jugadas con ★. **Atrás** retrocede 2 posiciones (tu jugada y la respuesta; 1 si juegas con ambos colores) y **Reiniciar** vuelve al inicio.
+Toca un punto para seleccionarlo; doble toque (o **Confirmar jugada**) para jugarlo. En josekis: **Tenuki** pasa: sigue la rama de tenuki de tu biblioteca (si no existe cuenta como fallo), **Ver opciones** muestra las letras, En partidas y josekis las marcas (triángulo, cuadrado, letra y número) usan el mismo selector que el editor de tsumegos y se guardan por posición en el SGF (TR/SQ/LB). Partidas, josekis y el editor de tsumegos muestran las últimas 10 jugadas sobre el tablero (‹ muestra el resto). Tocar fuera del tablero deshace la jugada seleccionada. En partidas y josekis (editor), **Ajustes → Entrada de jugadas** permite elegir entre *Doble toque con zoom* (el primer toque selecciona y acerca el tablero) y *Doble toque sin zoom*; en ambos, un segundo toque en el mismo punto o «Confirmar jugada» la juega. La piedra de selección toma el color de quien juega. El editor de tsumegos coloca la jugada directamente. En josekis puedes marcar jugadas con ★. **Atrás** retrocede 2 posiciones (tu jugada y la respuesta; 1 si juegas con ambos colores) y **Reiniciar** vuelve al inicio.
+
+## Cómo se programa el repaso
+
+Hay solo dos resultados. **Acierto** (llegas al final de la línea sin errores): el primer acierto da 1 día y después el intervalo se multiplica por 1.5 (1, 2, 3, 5, 8, 12… días). **Error** (una jugada fuera del árbol, caer en una línea incorrecta o «Mostrar línea»): la tarjeta vuelve a empezar y se repite hoy. **✎ Editar** no cuenta como acierto ni como error: la tarjeta sigue pendiente y vuelve al repaso al regresar. **Ajustes → Reiniciar fechas y repasos** deja todas las tarjetas como nuevas sin tocar nada más.
+
+**Correcta / incorrecta:** marcar una jugada marca también todas las ramas que parten de ella (y las jugadas nuevas heredan el veredicto). El repaso siempre llega al final de la secuencia; el rival prioriza la línea que lleva a un resultado incorrecto cuando existe.
+
+## Josekis: archivos y carpetas
+
+Cada joseki es un archivo con carpeta opcional. **Dividir aquí** (en el editor) mueve la jugada actual y lo que sigue a un archivo nuevo, conservando la línea que lleva hasta ahí. La miniatura muestra la primera posición donde el árbol se bifurca.
 
 ## Variantes (Ajustes)
 
@@ -44,7 +54,7 @@ Cada vez que subas cambios nuevos a `index.html`, sube también un cambio a `ser
 
 ## Guardado automático
 
-Tarjetas, partidas y josekis se guardan solos al editar; no hay botón de guardar obligatorio (en tarjetas, «Guardar y siguiente» solo sirve para pasar a la siguiente). Los avisos de «guardado» e importación ya no aparecen; solo se muestran los errores (jugada ilegal, archivo ilegible).
+Tarjetas, partidas y josekis se guardan solos al editar; no hay botones de guardar (en tarjetas quedan «← Anterior», «Siguiente →» y «Nueva tarjeta»; si entras desde un repaso, «← Volver al repaso»). Los avisos de «guardado» e importación ya no aparecen; solo se muestran los errores (jugada ilegal, archivo ilegible).
 
 ## Respaldo
 

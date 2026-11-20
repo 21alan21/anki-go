@@ -371,12 +371,12 @@ async function restoreBackup(text){
   if(!obj || obj.app!=='kifu' || !obj.data){ showToast('El archivo no es un respaldo de Kifu.', 'warn'); render(); return; }
   let n = 0;
   for(const [k,v] of Object.entries(obj.data)){ await storeSet(k, v); n++; }
-  showToast(`Respaldo restaurado (${n} elementos).`);
   State.prefs = Object.assign({}, DEFAULT_PREFS, await storeGet('prefs'));
   State.cards = await storeListCards(); State.book = null; State.bk = null; State.jp = null; State.jpSrc = null; State.game = null;
   await loadJosekiList();
   State.lists.game = await storeListColl('game');
   await updateDueBadge();
+  setSettingsNote(`Respaldo restaurado (${n} elementos).`);
   render();
 }
 async function storeDelete(key){
@@ -400,6 +400,7 @@ function normalizeCard(card){
   if(!card.note) card.note = '';
   card.flag = !!card.flag;
   card.doubt = !!card.doubt;
+  inheritVerdicts(card.tree, null);
   if(!card.folder) card.folder = '';
   if(!card.createdAt) card.createdAt = 0; // tarjetas antiguas sin marca de tiempo
   return card;
@@ -710,31 +711,36 @@ function linesToTree(correctLines, wrongLines){
   (wrongLines||[]).forEach(l=>{ if(l.length) addPathToTree(root,l,'wrong'); });
   return root;
 }
+/** El veredicto de un nodo vale para todo lo que sigue: los nodos sin veredicto heredan el del ancestro más cercano. */
+function inheritVerdicts(node, inherited){
+  const v = node.verdict || inherited || null;
+  if(node.x!==null && !node.verdict && inherited) node.verdict = inherited;
+  node.children.forEach(c=>inheritVerdicts(c, node.verdict || inherited));
+}
+/** Marca `node` y toda su descendencia con `verdict` (null quita el que tuviera). */
+function setVerdictDown(node, verdict){
+  const prev = node.verdict;
+  (function walk(n){
+    if(verdict===null){ if(n.verdict===prev) n.verdict = null; }
+    else n.verdict = verdict;
+    n.children.forEach(walk);
+  })(node);
+}
 function treeHasVerdict(node, verdict){
   if(node.verdict===verdict) return true;
   return node.children.some(c=>treeHasVerdict(c,verdict));
 }
-/** Recolecta rutas que llegan a un nodo con ese veredicto, truncando ahí (no sigue más allá). */
-function collectVerdictPaths(node, verdict){
-  const results = [];
-  function walk(n, path){
-    if(n.verdict===verdict){ results.push(path); return; }
-    n.children.forEach(c=>walk(c, path.concat([{x:c.x,y:c.y,color:c.color}])));
-  }
-  walk(node, []);
-  return results;
-}
 /** Primera ruta (DFS) desde `node` hasta un nodo marcado 'correct'. null si no hay ninguna. */
 function findFirstCorrectPath(node){
-  function walk(n, path){
-    if(n.verdict==='correct') return path;
+  function walk(n, path, leafOnly){
+    if(n.verdict==='correct' && (!leafOnly || n.children.length===0)) return path;
     for(const c of n.children){
-      const found = walk(c, path.concat([{x:c.x,y:c.y,color:c.color}]));
+      const found = walk(c, path.concat([{x:c.x,y:c.y,color:c.color}]), leafOnly);
       if(found) return found;
     }
     return null;
   }
-  return walk(node, []);
+  return walk(node, [], true) || walk(node, [], false);   // primero hasta el final de una línea correcta
 }
 function countLeavesByVerdict(node, counts){
   counts = counts || {correct:0, wrong:0, unmarked:0};
@@ -749,17 +755,19 @@ function countLeavesByVerdict(node, counts){
 }
 function coordChar(n){ return String.fromCharCode(97+n); }
 /** Serializa un árbol como cuerpo SGF (sin el nodo raíz, que no tiene jugada). */
-function treeToSGFBody(node){
+function treeToSGFBody(node, parentVerdict){
   let s = '';
   if(node.x!==null){
     s += `;${node.color}[${coordChar(node.x)}${coordChar(node.y)}]`;
-    if(node.verdict==='correct') s += 'C[correcta]';
-    else if(node.verdict==='wrong') s += 'C[incorrecta]';
+    if(node.verdict && node.verdict!==parentVerdict){   // lo heredado no se repite
+      s += node.verdict==='correct' ? 'C[correcta]' : 'C[incorrecta]';
+    }
   }
+  const pv = node.verdict || parentVerdict || null;
   if(node.children.length===1){
-    s += treeToSGFBody(node.children[0]);
+    s += treeToSGFBody(node.children[0], pv);
   } else if(node.children.length>1){
-    node.children.forEach(c=>{ s += '(' + treeToSGFBody(c) + ')'; });
+    node.children.forEach(c=>{ s += '(' + treeToSGFBody(c, pv) + ')'; });
   }
   return s;
 }
@@ -791,10 +799,12 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers, 
     cols = crop.maxX-crop.minX+1; rows = crop.maxY-crop.minY+1;
     pad = 10; cell = 13;
   } else {
-    pad = size>=19 ? 14 : (size>=13 ? 18 : 26);
-    cell = (100 - 2*pad) / (size - 1);
+    // el margen y las coordenadas son proporcionales a la casilla: en tableros chicos no sobra espacio
+    cell = 100 / ((size - 1) + 1.5 + (showCoords ? 0.8 : 0));
+    pad = cell * 0.75;
   }
-  const labelPad = showCoords ? pad*0.55 : 0;
+  const labelPad = showCoords ? cell*0.8 : 0;
+  const lineW = crop ? 0.25 : Math.max(0.25, cell*0.045);
   viewW = pad*2 + (cols-1)*cell + labelPad;
   viewH = pad*2 + (rows-1)*cell + labelPad;
   const sx = x => labelPad + pad + (x-offsetX)*cell;
@@ -804,10 +814,10 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers, 
 
   // grid (solo el rango visible)
   for(let i=offsetY; i<offsetY+rows; i++){
-    svg.appendChild(el("line",{x1:sx(offsetX),y1:sy(i),x2:sx(offsetX+cols-1),y2:sy(i),stroke:"var(--wood-line)","stroke-width":0.25}));
+    svg.appendChild(el("line",{x1:sx(offsetX),y1:sy(i),x2:sx(offsetX+cols-1),y2:sy(i),stroke:"var(--wood-line)","stroke-width":lineW}));
   }
   for(let i=offsetX; i<offsetX+cols; i++){
-    svg.appendChild(el("line",{x1:sx(i),y1:sy(offsetY),x2:sx(i),y2:sy(offsetY+rows-1),stroke:"var(--wood-line)","stroke-width":0.25}));
+    svg.appendChild(el("line",{x1:sx(i),y1:sy(offsetY),x2:sx(i),y2:sy(offsetY+rows-1),stroke:"var(--wood-line)","stroke-width":lineW}));
   }
   // resaltar los bordes que son la pared real del tablero (no solo un corte del recorte)
   if(crop){
@@ -820,18 +830,18 @@ function renderBoard(container, size, stones, onPoint, markers, marks, numbers, 
   // star points (solo si caen dentro del rango visible)
   starPoints(size).forEach(([x,y])=>{
     if(x<offsetX || x>=offsetX+cols || y<offsetY || y>=offsetY+rows) return;
-    svg.appendChild(el("circle",{cx:sx(x), cy:sy(y), r: crop ? cell*0.1 : 0.7, fill:"var(--wood-line)"}));
+    svg.appendChild(el("circle",{cx:sx(x), cy:sy(y), r: crop ? cell*0.1 : cell*0.13, fill:"var(--wood-line)"}));
   });
 
   // coordenadas
   if(showCoords){
     for(let x=offsetX; x<offsetX+cols; x++){
-      const t = el("text",{x:sx(x), y:sy(offsetY+rows-1)+labelPad*0.75, "text-anchor":"middle","font-size":labelPad*0.55, fill:"var(--ink-soft)","font-family":"Georgia, serif"});
+      const t = el("text",{x:sx(x), y:sy(offsetY+rows-1)+labelPad*0.75, "text-anchor":"middle","font-size":cell*0.4, fill:"var(--ink-soft)","font-family":"Georgia, serif"});
       t.textContent = COLS[x];
       svg.appendChild(t);
     }
     for(let y=offsetY; y<offsetY+rows; y++){
-      const t = el("text",{x:sx(offsetX)-labelPad*0.6, y:sy(y), "text-anchor":"middle","dominant-baseline":"central","font-size":labelPad*0.55, fill:"var(--ink-soft)","font-family":"Georgia, serif"});
+      const t = el("text",{x:sx(offsetX)-labelPad*0.6, y:sy(y), "text-anchor":"middle","dominant-baseline":"central","font-size":cell*0.4, fill:"var(--ink-soft)","font-family":"Georgia, serif"});
       t.textContent = size-y;
       svg.appendChild(t);
     }
@@ -1353,17 +1363,12 @@ function readZip(buffer){
 --------------------------------------------------------------- */
 function defaultSRS(){ return {ease:2.5, interval:0, reps:0, due: todayISO(), lastReview: null}; }
 function schedule(srs, rating){
-  let {ease, interval, reps} = srs;
-  if(rating===0){ // de nuevo
-    reps = 0; interval = 0; ease = Math.max(1.3, ease - 0.2);
-  } else {
+  let {interval, reps} = srs;
+  const ease = srs.ease;      // se conserva solo por compatibilidad con respaldos antiguos
+  if(rating===0){ reps = 0; interval = 0; }                       // volver a empezar: se repite hoy
+  else {
     reps += 1;
-    if(rating===1) ease = Math.max(1.3, ease - 0.15);
-    if(rating===3) ease = ease + 0.15;
-    if(reps===1) interval = 1;
-    else if(reps===2) interval = rating===1 ? 2 : 4;
-    else interval = Math.max(1, Math.round(interval * ease));
-    if(rating===1) interval = Math.max(1, Math.round(interval*0.8));
+    interval = reps===1 ? 1 : Math.max(interval+1, Math.round(interval*1.5));   // acierto: ×1.5
   }
   const due = new Date();
   due.setDate(due.getDate() + interval);
@@ -1400,7 +1405,7 @@ const State = {
   lastView: {},
 };
 
-const DEFAULT_PREFS = {boardSize:9, setupColor:'alt', firstMover:'B', dailyLimit:20, lastFolder:'', autoCrop:true, showCoords:false, autoTitle:true, titleTemplate:'Problema {}', nextNumber:1, reviewLog:{date:'', ids:[]}};
+const DEFAULT_PREFS = {boardSize:9, setupColor:'alt', firstMover:'B', dailyLimit:20, lastFolder:'', autoCrop:true, showCoords:false, editInput:'zoom', gameSize:19, autoTitle:true, titleTemplate:'Problema {}', nextNumber:1, reviewLog:{date:'', ids:[]}};
 
 function freshCreate(){
   const d = State.prefs || DEFAULT_PREFS;
@@ -1418,13 +1423,13 @@ function freshCreate(){
     markShape: 'triangle',
     title: (!d.lastTitleTemplate ? '' : d.lastTitleTemplate),
     note: '',
+    flag: false, doubt: false,
     mode: 'setup',        // 'setup' | 'tree' | 'marks'
     forceFullBoard: false,  // ver el tablero sin recortar, por si necesitas un punto fuera del recorte
   };
 }
 function saveCreateDefaults(st){
-  State.prefs = Object.assign({}, State.prefs, {boardSize: st.boardSize, setupColor: st.setupColor, firstMover: st.firstMover});
-  storeSet('prefs', State.prefs);
+  // los valores por defecto del tablero se eligen en Ajustes → Tablero; el editor ya no los sobrescribe
 }
 function saveFolderDefault(folder){
   State.prefs = Object.assign({}, State.prefs, {lastFolder: folder});
@@ -1455,9 +1460,10 @@ const SECTIONS = {
   tsumego:  {views:[['review','Repasar'],['free','Libre'],['list','Tarjetas'],['create','Crear']]},
   games:    {views:[['games','Mis partidas'],['games:new','Nueva']]},
   joseki:   {views:[['joseki-lib','Biblioteca'],['joseki-play','Practicar']]},
-  settings: {views:[]},
+  settings: {views:[['settings','Repaso'],['set-tablero','Tablero'],['set-datos','Datos']]},
 };
-const VIEW_SECTION = {review:'tsumego', free:'tsumego', list:'tsumego', create:'tsumego', games:'games', 'joseki-lib':'joseki', 'joseki-play':'joseki', settings:'settings'};
+const VIEW_SECTION = {review:'tsumego', free:'tsumego', list:'tsumego', create:'tsumego', games:'games', 'joseki-lib':'joseki', 'joseki-play':'joseki', settings:'settings', 'set-tablero':'settings', 'set-datos':'settings'};
+const SETTINGS_TABS = {settings:'repaso', 'set-tablero':'tablero', 'set-datos':'datos'};
 function renderNavs(){
   const sec = VIEW_SECTION[State.view] || 'tsumego';
   document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('active', b.dataset.section===sec));
@@ -1496,7 +1502,7 @@ async function switchView(v){
   if(v==='create' && !State.create) State.create = freshCreate();
   if(v==='review' || v==='free'){ State.freeMode = (v==='free'); await buildReviewQueue(); }
   if(v==='list') State.cards = await storeListCards();
-  if(v==='settings') State.cards = await storeListCards();
+  if(SETTINGS_TABS[v]){ State.cards = await storeListCards(); State.resetArmed = false; }
   if(v==='games') State.lists.game = await storeListColl('game');
   if(v==='games' || v==='joseki-lib'){ if(State.collKind!==v){ State.collKind = v; State.collFolder = 'all'; State.collFlagOnly = false; } }
   if(v==='joseki-lib' || v==='joseki-play'){
@@ -1609,6 +1615,7 @@ function startReviewStep(){
     status: 'guessing',       // guessing | following-wrong | feedback | exploring | finished
     cursor: card.tree,          // nodo del árbol en el que estás parado ahora mismo
     mistakes: 0,
+    failed: false,            // cayó en una línea marcada como incorrecta
     revealed: false,
     autoRating: null,
     msg: '',
@@ -1627,10 +1634,9 @@ function nextMoveColor(card, moveCount){
 }
 function wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
+/** Dos resultados: acierto (3) o volver a empezar (0). Cualquier error, caer en una línea incorrecta o «Mostrar línea» reinicia. */
 function computeAutoRating(step){
-  if(step.revealed) return 0;
-  if(step.mistakes>=2) return 1;
-  if(step.mistakes===1) return 2;
+  if(step.revealed || step.failed || step.mistakes>0) return 0;
   return 3;
 }
 function finalizeReview(step, msg, msgType){
@@ -1652,13 +1658,14 @@ function describeNextReview(previewSchedule){
  *  Devuelve 'correct' | 'wrong' | 'continue'. */
 function enterTreeNode(step, node){
   step.cursor = node;
-  if(node.verdict==='correct'){
-    finalizeReview(step, 'Correcto — línea completa.', 'ok');
-    return 'correct';
-  }
   if(node.verdict==='wrong'){
     step.status = 'following-wrong';
+    step.failed = true;
     return 'wrong';
+  }
+  if(node.verdict==='correct' && node.children.length===0 && !step.failed){
+    finalizeReview(step, 'Correcto — línea completa.', 'ok');
+    return 'correct';
   }
   return 'continue';
 }
@@ -1682,8 +1689,10 @@ async function autoPlayOpponent(){
     const nextColor = node.children[0].color;
     if(nextColor===uColor) return; // le toca al usuario
 
-    const withVerdict = node.children.filter(c=>treeHasVerdict(c,'correct') || treeHasVerdict(c,'wrong'));
-    const pool = withVerdict.length ? withVerdict : node.children;
+    // el rival prioriza la línea que lleva a un resultado incorrecto, si existe
+    const toWrong = node.children.filter(c=>treeHasVerdict(c,'wrong'));
+    const withVerdict = node.children.filter(c=>treeHasVerdict(c,'correct'));
+    const pool = toWrong.length ? toWrong : (withVerdict.length ? withVerdict : node.children);
     const chosen = pool[Math.floor(Math.random()*pool.length)];
     await wait(380);
     if(State.reviewStep !== step) return;
@@ -1707,7 +1716,7 @@ function render(){
   setTimeout(()=>window.scrollTo(0, keepY), 0);
   if(State.view==='create') renderCreate(view);
   else if(State.view==='review' || State.view==='free') renderReview(view);
-  else if(State.view==='settings') renderSettings(view);
+  else if(SETTINGS_TABS[State.view]) renderSettings(view);
   else if(State.view==='games') renderCollection(view, 'game');
   else if(State.view==='joseki-lib'){ if(State.book) renderBook(view); else renderCollection(view, 'joseki'); }
   else if(State.view==='joseki-play') renderBookPractice(view);
@@ -1723,6 +1732,16 @@ function renderCreate(root){
   const h = document.createElement('h2'); h.className='section-title';
   h.textContent = (st.id && !st.createdNew) ? 'Editar tarjeta' : 'Crear tarjeta';
   root.appendChild(h);
+
+  // marcas de la tarjeta: ★ favorita y ? dudosa (se autoguardan)
+  {
+    const mr = document.createElement('div'); mr.style.cssText='display:flex; gap:6px; margin:-4px 0 10px;';
+    const f = starBtn(!!st.flag, ()=>{ st.flag = !st.flag; render(); });
+    const d = document.createElement('button'); d.className='star doubt'+(st.doubt?' on':''); d.textContent='?';
+    d.title = st.doubt ? 'Duda marcada' : 'Marcar duda';
+    d.addEventListener('click', ()=>{ st.doubt = !st.doubt; render(); });
+    mr.appendChild(f); mr.appendChild(d); root.appendChild(mr);
+  }
 
   // modo de edición — arriba de todo, es lo primero que se usa
   const modeRow = document.createElement('div'); modeRow.className='btnrow';
@@ -1819,7 +1838,7 @@ function renderCreate(root){
           ? `background:${activeColor}; border-color:${activeColor}; color:#fff;`
           : `background:transparent; border-color:${activeColor}; color:${activeColor};`;
         b.textContent=label;
-        b.addEventListener('click', ()=>{ cursor.verdict = (cursor.verdict===key ? null : key); render(); });
+        b.addEventListener('click', ()=>{ setVerdictDown(cursor, cursor.verdict===key ? null : key); render(); });
         return b;
       };
       verdictRow.appendChild(mkVerdictBtn('correct','✓ Correcta','var(--pine)'));
@@ -1830,7 +1849,6 @@ function renderCreate(root){
   }
 
   const hasCorrect = treeHasVerdict(st.tree, 'correct');
-  const hasAnything = hasCorrect || st.setup.length>0 || st.tree.children.length>0;
 
   // anterior · siguiente (misma carpeta, orden natural por título)
   if(st.id && !st.createdNew){
@@ -1849,16 +1867,22 @@ function renderCreate(root){
     root.appendChild(navRow);
   }
 
-  // fila 1: guardar · nueva
+  // fila 1: (volver al repaso) · nueva — todo se guarda solo
   const saveRow = document.createElement('div'); saveRow.className='btnrow';
-  const saveBtn = document.createElement('button'); saveBtn.className='btn pine';
-  saveBtn.textContent = (st.id && !st.createdNew) ? 'Guardar y siguiente' : 'Guardar y nueva';
-  saveBtn.disabled = !hasAnything;
-  saveBtn.addEventListener('click', saveCurrentCard);
+  if(State.returnToReview){
+    const backBtn = document.createElement('button'); backBtn.className='btn pine';
+    backBtn.textContent = '← Volver al repaso';
+    backBtn.addEventListener('click', async ()=>{
+      await flushCreateSave();
+      State.returnToReview = false;
+      await switchView(State.freeMode ? 'free' : 'review');
+    });
+    saveRow.appendChild(backBtn);
+  }
   const clearBtn = document.createElement('button'); clearBtn.className='btn ghost';
   clearBtn.textContent = 'Nueva tarjeta';
   clearBtn.addEventListener('click', async ()=>{ await flushCreateSave(); State.create = freshCreate(); render(); });
-  saveRow.appendChild(saveBtn); saveRow.appendChild(clearBtn);
+  saveRow.appendChild(clearBtn);
   root.appendChild(saveRow);
 
   // fila 2: eliminar · ver tablero completo
@@ -2050,8 +2074,8 @@ async function autosaveCreate(st){
     marks: JSON.parse(JSON.stringify(st.marks||[])),
     title,
     note: (st.note||'').trim(),
-    flag: !!(existing && existing.flag),
-    doubt: !!(existing && existing.doubt),
+    flag: !!st.flag,
+    doubt: !!st.doubt,
     createdAt: (existing && existing.createdAt) || Date.now(),
     srs: (existing && existing.srs) || defaultSRS(),
   };
@@ -2209,8 +2233,7 @@ function handleCreateClick(x,y){
       return;
     }
     const newNode = newTreeNode(x,y,color);
-    newNode.verdict = 'correct'; // por defecto se asume que aquí termina bien; se puede cambiar o quitar
-    if(cursor.verdict==='correct') cursor.verdict = null; // ya no es el final de la línea, ahora sigue
+    newNode.verdict = cursor.verdict || 'correct'; // hereda el veredicto del nodo anterior; sin veredicto, se asume correcta (se puede cambiar o quitar)
     cursor.children.push(newNode);
     st.path.push(newNode);
   }
@@ -2219,88 +2242,6 @@ function handleCreateClick(x,y){
 function undoLastCreateAction(st){
   if(st.mode==='setup'){ st.setup.pop(); }
   else if(st.mode==='marks'){ st.marks.pop(); }
-}
-
-async function saveCurrentCard(){
-  const st = State.create;
-  clearTimeout(createSaveTimer);
-  const treeCopy = cloneTree(st.tree);
-  const hasCorrect = treeHasVerdict(treeCopy, 'correct');
-  if(!hasCorrect && st.setup.length===0 && st.tree.children.length===0) return; // nada que guardar
-  const folder = (st.folder||'').trim();
-  let title = (st.title||'').trim();
-  let titleTpl = '';
-  if(title.includes('{}')){
-    const n = (State.prefs && State.prefs.nextNumber) || 1;
-    titleTpl = title;
-    title = title.split('{}').join(n);
-    State.prefs = Object.assign({}, State.prefs, {nextNumber: n+1});
-  } else if(!title && (!State.prefs || State.prefs.autoTitle!==false)){
-    const n = (State.prefs && State.prefs.nextNumber) || 1;
-    title = autoTitleFor(n);
-    State.prefs = Object.assign({}, State.prefs, {nextNumber: n+1});
-  }
-  State.prefs = Object.assign({}, State.prefs, {lastTitleTemplate: titleTpl}); // el título con {} se conserva para la siguiente tarjeta
-  const wasEdit = !!st.id && !st.createdNew;
-  const existing = st.id ? ((await storeGet('card:'+st.id)) || null) : null;
-  const wasEditingDraft = wasEdit && !!st.wasDraft;
-  const card = {
-    id: st.id || uid(),
-    boardSize: st.boardSize,
-    setup: st.setup,
-    folder,
-    tree: treeCopy,
-    marks: st.marks,
-    title,
-    note: (st.note||'').trim(),
-    flag: !!(existing && existing.flag),
-    doubt: !!(existing && existing.doubt),
-    createdAt: (existing && existing.createdAt) || Date.now(),
-    srs: existing ? existing.srs || defaultSRS() : defaultSRS(),
-  };
-  await storeSet('card:'+card.id, card);
-  st.lastSaved = editSignature(st); st.snapshot = st.lastSaved;
-  State.cards = await storeListCards();
-  saveCreateDefaults(st);
-  saveFolderDefault(folder);
-  await updateDueBadge();
-
-  if(State.returnToReview){
-    State.returnToReview = false;
-    await switchView(State.freeMode ? 'free' : 'review');
-    showToast('Cambios guardados.');
-    render();
-    return;
-  }
-
-  if(wasEditingDraft){
-    const remainingDrafts = State.cards.filter(c=>c.id!==card.id && isDraftCard(c))
-      .sort((a,b)=>naturalCompare(cardSortLabel(a), cardSortLabel(b)));
-    if(remainingDrafts.length>0){
-      const next = remainingDrafts[0];
-      editCard(next);
-      showToast(`Guardado. Siguiente borrador: ${cardSortLabel(next)} (quedan ${remainingDrafts.length}).`);
-    } else {
-      State.create = freshCreate();
-      showToast(hasCorrect ? '¡Guardado — no quedan más borradores!' : 'Guardado.');
-    }
-  } else if(wasEdit){
-    // tarjeta existente: pasar a la siguiente de su carpeta (orden natural por título), en modo árbol
-    const sibs = State.cards.filter(c=>(c.folder||'')===(card.folder||''))
-      .sort((a,b)=>naturalCompare(cardSortLabel(a), cardSortLabel(b)) || a.id.localeCompare(b.id));
-    const next = sibs[sibs.findIndex(c=>c.id===card.id)+1];
-    if(next){
-      editCard(next);
-      showToast(`Guardado. Siguiente: ${cardSortLabel(next)}.`);
-    } else {
-      editCard(card);
-      showToast('Guardado — era la última de la carpeta.');
-    }
-  } else {
-    State.create = freshCreate();
-    showToast(hasCorrect ? 'Tarjeta guardada — lista para la siguiente.' : 'Borrador guardado — lista para la siguiente.');
-  }
-  render();
 }
 
 function showToast(msg, type){
@@ -2502,15 +2443,8 @@ else msgHtml = '';
   }
   // editar solo después de ver la línea o de intentar responder
   if(finished || step.revealed || step.moveCount>0 || step.mistakes>0){
-    const editFn = finished
-      ? async ()=>{
-          await commitReview();                 // guarda el resultado antes de salir
-          State.cards = await storeListCards(); await updateDueBadge();
-          State.returnToReview = true;
-          editCard(State.cards.find(c=>c.id===card.id) || card);
-          switchView('create');
-        }
-      : ()=>{ State.returnToReview = true; editCard(card._orig || card); switchView('create'); };
+    // editar no cuenta como acierto ni como error: la tarjeta sigue pendiente y vuelve al repaso al regresar
+    const editFn = async ()=>{ State.returnToReview = true; editCard(card._orig || card); switchView('create'); };
     row.appendChild(mk('✎ Editar','ghost', editFn, false));
   }
   root.appendChild(row);
@@ -2645,7 +2579,7 @@ function handleReviewPoint(x,y){
     const now = Date.now();
     const isDoubleTap = step.pending && step.pending.x===x && step.pending.y===y && (now - (step.lastTapTime||0)) < 400;
     step.pending = {x,y};
-    step.markers = new Map([[key,{type:'pending'}]]);
+    step.markers = new Map([[key,{type:'ghost', color: nextMoveColor(State.reviewQueue[State.reviewIdx], step.moveCount)}]]);
     step.lastTapTime = now;
     if(isDoubleTap){
       confirmReviewMove();
@@ -2937,7 +2871,6 @@ function renderCardItem(root, card){
   const mini = document.createElement('div'); mini.className='mini';
   const stones = new Map();
   card.setup.forEach(p=>stones.set(p.x+','+p.y,p.color));
-  if(card.tree.children[0]) stones.set(card.tree.children[0].x+','+card.tree.children[0].y, card.tree.children[0].color);
   renderBoard(mini, card.boardSize, stones, null, null);
   item.appendChild(mini);
   { const mb = markBtns(card); mb.style.flexDirection='column'; item.appendChild(mb); }
@@ -2985,15 +2918,15 @@ function editCard(card){
     marks: JSON.parse(JSON.stringify(card.marks||[])),
     markShape: 'triangle', setupColor: (State.prefs && State.prefs.setupColor) || 'alt',
     title: card.title || '', note: card.note || '', mode: 'tree',
+    flag: !!card.flag, doubt: !!card.doubt,
     forceFullBoard: false,
   };
   State.create.origFolder = card.folder || '';
   State.create.snapshot = editSignature(State.create);
   State.create.lastSaved = State.create.snapshot;
-  State.create.wasDraft = isDraftCard(card);
-}
+  }
 function editSignature(st){
-  return JSON.stringify([st.boardSize, st.setup, st.tree, st.marks, st.title, st.note, (st.folder||'').trim()]);
+  return JSON.stringify([st.boardSize, st.setup, st.tree, st.marks, st.title, st.note, (st.folder||'').trim(), !!st.flag, !!st.doubt]);
 }
 /** Tarjetas de la misma carpeta, en orden natural por título (los números siguen el orden lógico). */
 async function folderSiblings(card){
@@ -3221,6 +3154,29 @@ function pickJosekiFolder(){
   });
   file.click();
 }
+/** Mueve la jugada actual y todo lo que sigue a un archivo nuevo (con la línea que lleva hasta ella, para poder practicarlo solo). */
+async function splitBookHere(){
+  const book = State.book, bk = State.bk;
+  if(!book || !bk || bk.path.length<2) return;
+  const path = bk.path, node = path[path.length-1], parent = path[path.length-2];
+  const where = node.pass ? 'tenuki' : coordLabel(node.x, node.y, book.boardSize);
+  const name = prompt('Nombre del archivo nuevo (se mueve esta jugada y todo lo que sigue):', ((book.title||'Joseki')+' – '+where));
+  if(name===null) return;
+  const rec = newJosekiRecord(name.trim() || ((book.title||'Joseki')+' – '+where), book.folder||'');
+  if(book.tree.comment) rec.tree.comment = book.tree.comment;
+  let cur = rec.tree;
+  path.slice(1).forEach(n=>{
+    const c = (n===node) ? n : JSON.parse(JSON.stringify(Object.assign({}, n, {children:[]})));
+    cur.children.push(c); cur = c;
+  });
+  parent.children = parent.children.filter(c=>c!==node);
+  bk.path = path.slice(0,-1);
+  clearTimeout(bookTimer);
+  await saveBook();
+  await storeSet('joseki:'+rec.id, rec);
+  (State.lists.joseki = State.lists.joseki||[]).push(rec);
+  openJosekiFile(rec);
+}
 function openJosekiFile(rec){
   State.book = rec; State.bk = null; State.jpSrc = null; State.jp = null;
   render();
@@ -3293,9 +3249,21 @@ function deleteMoveButton(h, onChange){
   });
   return b;
 }
+function bookOpts(){
+  const book = State.book, bk = State.bk;
+  return {size:book.boardSize, setup:[], color:()=>bookTurn(book,bk.path), onChange:saveBook};
+}
+function bookConfirm(){
+  const bk = State.bk; if(!bk || !bk.pending) return;
+  const {x,y} = bk.pending; pendingClear(bk);
+  treeClick(bk, x, y, bookOpts());
+}
 function bookClick(x,y){
   const book = State.book, bk = State.bk;
-  treeClick(bk, x, y, {size:book.boardSize, setup:[], color:()=>bookTurn(book,bk.path), onChange:saveBook});
+  const cur = bk.path[bk.path.length-1];
+  if(bk.mode==='marks' || cur.children.some(c=>c.x===x && c.y===y)){ pendingClear(bk); treeClick(bk, x, y, bookOpts()); return; }
+  bk.boardSize = book.boardSize;
+  pendingTap(bk, cur, x, y, bookStones(book, bk.path).has(x+','+y), bookConfirm);
 }
 document.addEventListener('keydown', e=>{
   if(State.view!=='joseki-lib' || !State.bk) return;
@@ -3366,6 +3334,7 @@ function renderBook(root){
     root.appendChild(folderInputField(book.folder||'', v=>{ book.folder = v.trim(); bookChanged(); }, (State.lists.joseki||[]).map(r=>r.folder), 'joseki-folder-suggestions'));
   }
   const cur = bk.path[bk.path.length-1], total = bk.path.length-1;
+  pendingValidate(bk, cur, bk.mode==='marks');
   const stones = bookStones(book, bk.path);
   const turn = bookTurn(book, bk.path);
   const status = document.createElement('div'); status.className='status-line';
@@ -3384,9 +3353,11 @@ function renderBook(root){
     markers.set(c.x+','+c.y, {type:'letter', text:LETTERS[i]||'?'});
   });
   const shown = stones;
-  const crop = (!State.prefs || State.prefs.autoCrop!==false) ? computeCropBounds(book.boardSize, [], book.tree, []) : null;
+  if(bk.pending) markers.set(bk.pending.x+','+bk.pending.y, {type:'ghost', color:turn});
+  const crop = bk.zoomBox || ((!State.prefs || State.prefs.autoCrop!==false) ? computeCropBounds(book.boardSize, [], book.tree, []) : null);
   const showCoords = !!(State.prefs && State.prefs.showCoords);
   renderBoard(boardWrap, book.boardSize, shown, (x,y)=>bookClick(x,y), markers, cur.marks||null, null, crop, showCoords);
+  if(bk.pending) root.appendChild(pendingRow(bk, bookConfirm));
 
   root.appendChild(treeNavRow(bk, book.tree));
   root.appendChild(markToolbar(bk, []));
@@ -3438,7 +3409,11 @@ function renderBook(root){
   const expBtn = document.createElement('button'); expBtn.className='btn ghost small'; expBtn.textContent='Exportar .sgf';
   expBtn.disabled = !book.tree.children.length;
   expBtn.addEventListener('click', exportBook);
-  io.appendChild(impBtn); io.appendChild(expBtn);
+  const splitBtn = document.createElement('button'); splitBtn.className='btn ghost small'; splitBtn.textContent='Dividir aquí';
+  splitBtn.title = 'Mover esta jugada y lo que sigue a un archivo nuevo';
+  splitBtn.disabled = total===0;
+  splitBtn.addEventListener('click', splitBookHere);
+  io.appendChild(splitBtn); io.appendChild(impBtn); io.appendChild(expBtn);
   root.appendChild(io);
 }
 
@@ -3452,7 +3427,8 @@ function jpMakeView(b){
 function mergeForPractice(t, src, rec){
   src.children.forEach(sc=>{
     let tc = t.children.find(c=>c.x===sc.x && c.y===sc.y && c.color===sc.color);
-    if(!tc){ tc = newTreeNode(sc.x, sc.y, sc.color); if(sc.pass) tc.pass = true; addChildSorted(t, tc); tc._src = sc; tc._rec = rec; }
+    if(!tc){ tc = newTreeNode(sc.x, sc.y, sc.color); if(sc.pass) tc.pass = true; addChildSorted(t, tc); tc._src = sc; tc._rec = rec; tc._srcs = []; }
+    tc._srcs.push({node:sc, rec});
     if(sc.comment && !tc.comment) tc.comment = sc.comment;
     if(sc.loss!=null && tc.loss==null) tc.loss = sc.loss;
     if(sc.flag) tc.flag = true;
@@ -3632,10 +3608,13 @@ function renderBookPractice(root){
   else st = `Juega ${turnColor==='B'?'Negro':'Blanco'}${js.side==='both'?'':' (tú)'}`;
   status.innerHTML = `<span>${st}${js.msg ? ' · <span class="msg bad">'+esc(js.msg)+'</span>' : ''}</span>`;
   if(total>0){
-    const last = js.path[js.path.length-1], orig = last._src || last;
-    status.appendChild(starBtn(!!orig.flag, ()=>{
-      if(orig.flag) delete orig.flag; else orig.flag = true;
-      const rec = last._rec || src.rec; if(rec) storeSet('joseki:'+rec.id, rec);
+    const last = js.path[js.path.length-1];
+    const targets = last._srcs ? last._srcs : [{node: last._src || last, rec: last._rec || src.rec}];
+    const anyFlag = targets.some(t=>t.node.flag);
+    status.appendChild(starBtn(anyFlag, ()=>{
+      const recs = new Set();
+      targets.forEach(t=>{ if(anyFlag) delete t.node.flag; else t.node.flag = true; if(t.rec) recs.add(t.rec); });
+      recs.forEach(r=>storeSet('joseki:'+r.id, r));
       render();
     }));
   }
@@ -3645,7 +3624,7 @@ function renderBookPractice(root){
   root.appendChild(boardWrap);
   const markers = new Map();
   if(js.showOptions && userTurn) cur.children.filter(c=>!c.pass).forEach((c,i)=>markers.set(c.x+','+c.y, {type:'letter', text:LETTERS[i]||'?'}));
-  if(js.pending) markers.set(js.pending.x+','+js.pending.y, {type:'pending'});
+  if(js.pending) markers.set(js.pending.x+','+js.pending.y, {type:'ghost', color: turnColor || js.side || 'B'});
   const crop = (!State.prefs || State.prefs.autoCrop!==false) ? computeCropBounds(book.boardSize, [], book.tree, []) : null;
   const showCoords = !!(State.prefs && State.prefs.showCoords);
   renderBoard(boardWrap, book.boardSize, stones, userTurn && !js.busy ? (x,y)=>jpTap(x,y) : null, markers, cur.marks||null, null, crop, showCoords);
@@ -3707,8 +3686,8 @@ function renderBookPractice(root){
 
 /* ----------------------- Colecciones: partidas y josekis (fuera del repaso) ----------------------- */
 const COLL = {
-  game:   {prefix:'game:',   title:'Partidas',  one:'partida', hint:'Kifus para estudiar o revisar. No entran al repaso espaciado.', idp:'g'},
-  joseki: {prefix:'joseki:', title:'Biblioteca de josekis', one:'joseki', hint:'', idp:'j'},
+  game:   {prefix:'game:',   title:'Partidas',  one:'partida', idp:'g'},
+  joseki: {prefix:'joseki:', title:'Biblioteca de josekis', one:'joseki', idp:'j'},
 };
 async function storeListColl(kind){
   const prefix = COLL[kind].prefix;
@@ -3737,7 +3716,8 @@ function gameMetaLine(g){
 }
 function newInfo(){ return {pb:'', pw:'', br:'', wr:'', komi:'6.5', handicap:0, date:todayISO(), result:''}; }
 function newItem(kind){
-  const it = {id:COLL[kind].idp+uid(), title:'', boardSize:19, setup:[], tree:newTreeRoot(), createdAt:Date.now()};
+  const gs = State.prefs && [9,13,19].includes(State.prefs.gameSize) ? State.prefs.gameSize : 19;
+  const it = {id:COLL[kind].idp+uid(), title:'', boardSize: kind==='game' ? gs : 19, setup:[], tree:newTreeRoot(), createdAt:Date.now()};
   if(kind==='game') it.info = newInfo();
   return it;
 }
@@ -3777,7 +3757,6 @@ async function saveItem(silent){
   gm.title = title; gm.dirty = false; gm.saved = true;
   State.lists[gm.kind] = await storeListColl(gm.kind);
   if(silent===true) return;   // autoguardado: sin aviso ni redibujar (no quita el foco al escribir)
-  showToast('Guardado.');
   render();
 }
 function gameStones(gm){
@@ -3796,6 +3775,34 @@ function gameStep(d){
   }
   render();
 }
+/** Entrada de jugadas en partidas y josekis: 'zoom' (selecciona, acerca y confirma) o 'double' (selecciona; segundo toque confirma). */
+function editInputMode(){
+  const p = State.prefs || {};
+  if(p.editInput==='zoom' || p.editInput==='double') return p.editInput;
+  return p.zoomConfirm===false ? 'double' : 'zoom';
+}
+function pendingClear(h){ h.pending = null; h.zoomBox = null; }
+/** Descarta una selección pendiente si ya no corresponde (otra posición, otro modo o ajuste desactivado). */
+function pendingValidate(h, cursor, marksMode){
+  if(h.pending && (h.pendingAt!==cursor || marksMode)) pendingClear(h);
+  if(h.zoomBox && editInputMode()!=='zoom') h.zoomBox = null;
+}
+/** Primer toque: selecciona y acerca; tocar el mismo punto confirma. Devuelve true si el toque quedó atendido aquí. */
+function pendingTap(h, cursor, x, y, occupied, confirmFn){
+  if(h.pending && h.pending.x===x && h.pending.y===y){ confirmFn(); return true; }
+  if(occupied) return true;
+  h.pending = {x,y}; h.pendingAt = cursor;
+  if(editInputMode()==='zoom' && !h.zoomBox) h.zoomBox = zoomBoxAround(h.boardSize || State.book&&State.book.boardSize || 19, x, y);
+  render(); return true;
+}
+function pendingRow(h, confirmFn){
+  const pr = document.createElement('div'); pr.className='btnrow fill';
+  const ok = document.createElement('button'); ok.className='btn pine'; ok.textContent='Confirmar jugada';
+  ok.addEventListener('click', confirmFn);
+  const no = document.createElement('button'); no.className='btn ghost'; no.textContent='Cancelar';
+  no.addEventListener('click', ()=>{ pendingClear(h); render(); });
+  pr.appendChild(ok); pr.appendChild(no); return pr;
+}
 function gameOpts(gm){
   return {size:gm.boardSize, setup:gm.setup, color:()=>gameTurn(gm), onChange:()=>{ gm.dirty = true; gameAutosave(); }};
 }
@@ -3813,11 +3820,7 @@ function gameClick(x,y){
   if(gm.mode==='marks'){ gameClearPending(); treeClick(gm, x, y, gameOpts(gm)); return; }
   const cur = gm.path[gm.path.length-1];
   if(cur.children.some(c=>c.x===x && c.y===y)){ gameClearPending(); treeClick(gm, x, y, gameOpts(gm)); return; }   // seguir una variante existente
-  if(gameStones(gm).has(x+','+y)) return;
-  if(gm.pending && gm.pending.x===x && gm.pending.y===y){ gameConfirm(); return; }
-  gm.pending = {x,y}; gm.pendingAt = cur;
-  if(!gm.zoomBox) gm.zoomBox = zoomBoxAround(gm.boardSize, x, y);
-  render();
+  pendingTap(gm, cur, x, y, gameStones(gm).has(x+','+y), gameConfirm);
 }
 function gameConfirm(){
   const gm = State.game; if(!gm || !gm.pending) return;
@@ -3994,7 +3997,18 @@ function renderCollection(root, kind){
     const item = document.createElement('div'); item.className='card-item';
     const mini = document.createElement('div'); mini.className='mini';
     const stones = new Map(); (g.setup||[]).forEach(p=>stones.set(p.x+','+p.y,p.color));
-    renderBoard(mini, g.boardSize, stones, null, null);
+    if(kind==='joseki'){
+      // sigue la línea principal hasta la primera jugada con varias opciones: esa es la posición que se muestra
+      const path = [g.tree]; let n = g.tree;
+      while(n.children.length===1){ n = n.children[0]; path.push(n); }
+      const shown = buildLineDisplay(g.boardSize, g.setup||[], pathToMoves(path)).stones;
+      const mk = new Map();
+      if(n.children.length>1) n.children.filter(c=>!c.pass).forEach(c=>mk.set(c.x+','+c.y, {type:'hint', verdict:null, n:1}));
+      const pts = []; shown.forEach((c,k)=>{ const [x,y]=k.split(',').map(Number); pts.push({x,y}); });
+      mk.forEach((v,k)=>{ const [x,y]=k.split(',').map(Number); pts.push({x,y}); });
+      const crop = pts.length ? computeCropBounds(g.boardSize, pts, null, null) : null;
+      renderBoard(mini, g.boardSize, shown, null, mk, null, null, crop, false);
+    } else renderBoard(mini, g.boardSize, stones, null, null);
     item.appendChild(mini);
     item.appendChild(starBtn(!!g.flag, async ()=>{ g.flag = !g.flag; await storeSet(C.prefix+g.id, g); render(); }));
     const info = document.createElement('div'); info.className='info';
@@ -4059,6 +4073,25 @@ function gameInfoPanel(gm){
   const row = (...fs)=>{ const r = document.createElement('div'); r.className='row'; fs.forEach(f=>r.appendChild(f)); return r; };
   wrap.appendChild(row(inp('● Negro','pb','Nombre'), inp('Kyu / dan','br','12k')));
   wrap.appendChild(row(inp('○ Blanco','pw','Nombre'), inp('Kyu / dan','wr','10k')));
+  {
+    const sf = document.createElement('div'); sf.className='field';
+    sf.innerHTML = '<label>Tablero</label>';
+    const tg = document.createElement('div'); tg.className='toggle-group';
+    [9,13,19].forEach(sz=>{
+      const b = document.createElement('button'); b.textContent = sz+'×'+sz;
+      if(gm.boardSize===sz) b.classList.add('active');
+      b.addEventListener('click', ()=>{
+        if(gm.boardSize===sz) return;
+        const hasMoves = gm.tree.children.length>0;
+        if(hasMoves && !confirm('Cambiar el tamaño borrará las jugadas de esta partida. ¿Continuar?')) return;
+        gm.boardSize = sz; gm.tree = newTreeRoot(); gm.path = [gm.tree]; pendingClear(gm);
+        gm.setup = handicapStones(sz, parseInt(info.handicap,10)||0);
+        gm.dirty = true; gameAutosave(); render();
+      });
+      tg.appendChild(b);
+    });
+    sf.appendChild(tg); wrap.appendChild(sf);
+  }
   const hf = document.createElement('div'); hf.className='field'; hf.style.flex='1'; hf.style.minWidth='0';
   hf.innerHTML = '<label>Handicap</label>';
   const hi = document.createElement('input'); hi.type='text'; hi.inputMode='numeric'; hi.value = info.handicap||0;
@@ -4078,7 +4111,7 @@ function gameInfoPanel(gm){
 }
 function renderItemEditor(root){
   const gm = State.game, C = COLL[gm.kind];
-  if(gm.pending && (gm.pendingAt!==gm.path[gm.path.length-1] || gm.mode==='marks')){ gm.pending = null; gm.zoomBox = null; }
+  pendingValidate(gm, gm.path[gm.path.length-1], gm.mode==='marks');
   appendToast(root);
   const top = document.createElement('div'); top.className='btnrow'; top.style.marginTop='0';
   const back = document.createElement('button'); back.className='btn ghost small'; back.textContent='← '+C.title;
@@ -4169,11 +4202,25 @@ function renderItemEditor(root){
 }
 
 /* ----------------------- Ajustes ----------------------- */
-function renderSettings(root){
+/** Aviso breve dentro de Ajustes (los avisos emergentes están desactivados). */
+function setSettingsNote(msg){
+  State.settingsNote = msg;
+  clearTimeout(State.settingsNoteTimer);
+  State.settingsNoteTimer = setTimeout(()=>{ State.settingsNote = ''; if(SETTINGS_TABS[State.view]) render(); }, 5000);
+}
+function renderSettings(host){
+  let root = host;
+  const S = {repaso:document.createElement('div'), tarjetas:document.createElement('div'), tablero:document.createElement('div'), datos:document.createElement('div')};
   const h = document.createElement('h2'); h.className='section-title'; h.textContent='Ajustes';
   root.appendChild(h);
 
   appendToast(root);
+  if(State.settingsNote){
+    const note = document.createElement('div'); note.className='status-line';
+    note.style.cssText = 'color:var(--pine); font-weight:600; margin:0 0 10px;';
+    note.textContent = '✓ '+State.settingsNote; root.appendChild(note);
+  }
+  root = S.repaso;
 
   const limitField = document.createElement('div'); limitField.className='field';
   limitField.innerHTML = '<label>Límite de repasos por día (0 = sin límite)</label>';
@@ -4192,6 +4239,7 @@ function renderSettings(root){
   limitField.appendChild(limitHint);
   root.appendChild(limitField);
 
+  root = S.tarjetas;
   const numTitle = document.createElement('h2'); numTitle.className='section-title'; numTitle.style.fontSize='16px'; numTitle.textContent='Títulos';
   root.appendChild(numTitle);
   const autoRow = document.createElement('label');
@@ -4228,8 +4276,7 @@ function renderSettings(root){
     root.appendChild(numRow);
   }
 
-  const displayTitle = document.createElement('h2'); displayTitle.className='section-title'; displayTitle.style.fontSize='16px'; displayTitle.textContent='Tablero';
-  root.appendChild(displayTitle);
+  root = S.tablero;
 
   const mkCheckboxRow = (checked, label, onChange)=>{
     const row = document.createElement('label');
@@ -4256,10 +4303,55 @@ function renderSettings(root){
   });
   root.appendChild(coordsRow);
 
+  {
+    const f = document.createElement('div'); f.className='field';
+    f.innerHTML = '<label>Entrada de jugadas en partidas y josekis</label>';
+    const sel = document.createElement('select');
+    [['zoom','Doble toque con zoom (el primer toque acerca el tablero)'],['double','Doble toque sin zoom']].forEach(([v,l])=>{
+      const o = document.createElement('option'); o.value=v; o.textContent=l; sel.appendChild(o);
+    });
+    sel.value = editInputMode();
+    sel.addEventListener('change', async ()=>{
+      State.prefs = Object.assign({}, State.prefs, {editInput: sel.value});
+      await storeSet('prefs', State.prefs);
+    });
+    f.appendChild(sel); root.appendChild(f);
+  }
+
+  {
+    const hd = document.createElement('h2'); hd.className='section-title'; hd.style.cssText='font-size:16px; margin-top:18px;'; hd.textContent='Valores por defecto al crear';
+    root.appendChild(hd);
+    const choice = (label, key, options)=>{
+      const f = document.createElement('div'); f.className='field';
+      f.innerHTML = `<label>${label}</label>`;
+      const tg = document.createElement('div'); tg.className='toggle-group';
+      const cur = (State.prefs && State.prefs[key]!==undefined) ? State.prefs[key] : DEFAULT_PREFS[key];
+      options.forEach(([v,l])=>{
+        const b = document.createElement('button'); b.textContent = l;
+        if(cur===v) b.classList.add('active');
+        b.addEventListener('click', async ()=>{
+          State.prefs = Object.assign({}, State.prefs, {[key]: v});
+          await storeSet('prefs', State.prefs);
+          if(State.create && !State.create.id && !createHasContent(State.create)) State.create = null;   // la tarjeta en blanco toma los nuevos valores
+          render();
+        });
+        tg.appendChild(b);
+      });
+      f.appendChild(tg); root.appendChild(f);
+    };
+    const sizes = [[9,'9×9'],[13,'13×13'],[19,'19×19']];
+    choice('Tsumegos: tamaño del tablero', 'boardSize', sizes);
+    choice('Tsumegos: piedra a colocar en la posición inicial', 'setupColor', [['B','Negro'],['W','Blanco'],['alt','Alternar']]);
+    choice('Tsumegos: color que juega primero (el que practicas)', 'firstMover', [['B','Negro'],['W','Blanco']]);
+    choice('Partidas: tamaño del tablero', 'gameSize', sizes);
+    const hn = document.createElement('p'); hn.className='hint'; hn.textContent='Se aplican a las tarjetas y partidas nuevas.'; root.appendChild(hn);
+  }
+
   const mkPref = (key,label)=>mkCheckboxRow(!!(State.prefs && State.prefs[key]), label, async (e)=>{
     State.prefs = Object.assign({}, State.prefs, {[key]: e.target.checked});
     await storeSet('prefs', State.prefs);
   });
+  root = S.repaso;
   const hT = document.createElement('div'); hT.className='field'; hT.innerHTML='<label>Tsumegos (repaso)</label>'; root.appendChild(hT);
   root.appendChild(mkPref('tsSym','Posiciones espejo y rotadas'));
   root.appendChild(mkPref('tsInv','Colores invertidos'));
@@ -4300,6 +4392,7 @@ function renderSettings(root){
 
   const t = todayISO();
   const cards = State.cards||[];
+  root = S.datos;
   const dueTotal = cards.filter(c=>treeHasVerdict(c.tree,'correct') && c.srs.due<=t).length;
   const draftTotal = cards.filter(isDraftCard).length;
   const statsBox = document.createElement('div'); statsBox.className='lines-box';
@@ -4312,10 +4405,9 @@ function renderSettings(root){
   {
     const u = storageUsage();
     const pct = Math.min(100, u.pct);
-    const lbl = document.getElementById('storage-label'), bar = document.getElementById('storage-bar');
     // se rellena tras insertar en el DOM; si aún no está, se hace en el siguiente ciclo
     const fill = ()=>{
-      const l = document.getElementById('storage-label'), b2 = document.getElementById('storage-bar');
+      const l = statsBox.querySelector('#storage-label'), b2 = statsBox.querySelector('#storage-bar');
       if(!l||!b2) return;
       l.textContent = `${fmtBytes(u.chars)} de ~${fmtBytes(u.limitChars)} · ${pct<1 && u.chars>0 ? '<1' : pct.toFixed(pct<10?1:0)}%`;
       b2.style.width = pct+'%';
@@ -4324,17 +4416,58 @@ function renderSettings(root){
     fill(); setTimeout(fill,0);
     if(navigator.storage && navigator.storage.estimate){
       navigator.storage.estimate().then(est=>{
-        const l = document.getElementById('storage-label');
+        const l = statsBox.querySelector('#storage-label');
         if(l && est && est.quota){ l.title = `Total del navegador para este sitio: ${fmtBytes(est.usage||0)} de ${fmtBytes(est.quota)}`; }
       }).catch(()=>{});
     }
   }
   if(draftTotal>0){
-    document.getElementById('drafts-stat-row').addEventListener('click', async ()=>{
+    statsBox.querySelector('#drafts-stat-row').addEventListener('click', async ()=>{
       State.listDraftsOnly = true;
       State.listFolder = 'all';
       await switchView('list');
     });
+  }
+
+  {
+    root = S.repaso;
+    const n = (State.cards||[]).length;
+    const rt = document.createElement('div'); rt.className='field'; rt.innerHTML='<label>Reiniciar fechas y repasos</label>'; root.appendChild(rt);
+    if(!State.resetArmed){
+      const hint = document.createElement('p'); hint.className='hint';
+      hint.textContent = 'Deja todas las tarjetas como nuevas y pendientes hoy. No borra tarjetas, marcas ni carpetas.';
+      root.appendChild(hint);
+      const rr = document.createElement('div'); rr.className='btnrow';
+      const rb = document.createElement('button'); rb.className='btn ghost small'; rb.textContent='Reiniciar…'; rb.disabled = n===0;
+      rb.addEventListener('click', ()=>{ State.resetArmed = true; render(); });
+      rr.appendChild(rb); root.appendChild(rr);
+    } else {
+      const box = document.createElement('div'); box.className='lines-box';
+      box.style.cssText = 'border-color:var(--shu);';
+      box.innerHTML = `<div style="color:var(--shu); font-weight:700; margin-bottom:6px;">¿Reiniciar ${n} tarjeta(s)?</div>
+        <div style="font-size:13px; margin-bottom:10px;">Se borrarán las fechas de repaso y el número de veces que se ha repasado cada una. Esto no se puede deshacer (haz un respaldo antes si dudas).</div>`;
+      const br = document.createElement('div'); br.className='btnrow fill'; br.style.margin='0';
+      const yes = document.createElement('button'); yes.className='btn small'; yes.textContent='Sí, reiniciar';
+      yes.style.cssText = 'background:var(--shu); border-color:var(--shu); color:#fff;';
+      yes.addEventListener('click', async ()=>{
+        for(const c of State.cards){
+          const full = (await storeGet('card:'+c.id)) || c;
+          full.srs = defaultSRS();
+          await storeSet('card:'+c.id, full);
+        }
+        State.prefs = Object.assign({}, State.prefs, {reviewLog:null});   // también el conteo diario
+        await storeSet('prefs', State.prefs);
+        State.cards = await storeListCards();
+        await updateDueBadge();
+        State.resetArmed = false;
+        setSettingsNote(`${n} tarjeta(s) reiniciadas: todas quedaron como nuevas y pendientes hoy.`);
+        render();
+      });
+      const no = document.createElement('button'); no.className='btn ghost small'; no.textContent='Cancelar';
+      no.addEventListener('click', ()=>{ State.resetArmed = false; render(); });
+      br.appendChild(yes); br.appendChild(no); box.appendChild(br); root.appendChild(box);
+    }
+    root = S.datos;
   }
 
   const fullTitle = document.createElement('h2'); fullTitle.className='section-title'; fullTitle.textContent='Respaldo completo';
@@ -4412,7 +4545,7 @@ function renderSettings(root){
   copyBtn.addEventListener('click', async ()=>{
     try{
       await navigator.clipboard.writeText(copyArea.value);
-      showToast('Copiado al portapapeles.');
+      setSettingsNote('Tarjetas copiadas al portapapeles.');
     }catch(e){
       copyArea.select();
       showToast('Selecciona el texto y cópialo manualmente (Ctrl/⌘+C).', 'warn');
@@ -4433,6 +4566,9 @@ function renderSettings(root){
   pasteBtn.addEventListener('click', ()=>importFromText(pasteArea.value));
   pasteBtnRow.appendChild(pasteBtn);
   root.appendChild(pasteBtnRow);
+  const tabKey = SETTINGS_TABS[State.view]||'repaso';
+  host.appendChild(S[tabKey]);
+  if(tabKey==='repaso') host.appendChild(S.tarjetas);   // los títulos automáticos van al final de la misma sección
 }
 
 async function importFromText(text){
@@ -4454,7 +4590,7 @@ async function importFromText(text){
   }
   State.cards = await storeListCards();
   await updateDueBadge();
-  showToast(`Importadas: ${created} nuevas, ${updated} actualizadas.`);
+  setSettingsNote(`Importadas: ${created} nuevas, ${updated} actualizadas.`);
   render();
 }
 
@@ -4493,9 +4629,8 @@ async function importBulkFile(file){
     }
     State.cards = await storeListCards();
     await updateDueBadge();
-    showToast(failed>0
-      ? `Se importaron ${created} tarjetas (${failed} archivo(s) no se pudieron leer).`
-      : `Se importaron ${created} tarjetas.`);
+    if(failed>0) showToast(`Se importaron ${created} tarjetas (${failed} archivo(s) no se pudieron leer).`, 'warn');
+    else setSettingsNote(`Se importaron ${created} tarjetas.`);
     render();
   }catch(e){
     showToast('No se pudo importar: '+e.message, 'warn');
