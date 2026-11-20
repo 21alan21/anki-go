@@ -422,6 +422,19 @@ async function storeSet(key,val){
     return true;
   }
 }
+/** Guarda muchas claves de una vez (una sola transacción en IndexedDB): para importar libros enteros. */
+async function storeSetMany(pairs){
+  dataVersion++;
+  const jsons = pairs.map(([k,v])=>[k, JSON.stringify(v)]);
+  if(storageMode==='idb'){
+    jsons.forEach(([k,j])=>memoryStore.set(k,j));
+    try{ await idbWrite(st=>{ jsons.forEach(([k,j])=>st.put(j,k)); }); }
+    catch(e){ degradeToSession(e); }
+    return true;
+  }
+  for(const [k,v] of pairs) await storeSet(k, v);
+  return true;
+}
 /** Todo lo guardado (tarjetas, partidas, biblioteca, ajustes) como un objeto {clave: valor}. */
 function storeDump(){
   const out = {};
@@ -1074,7 +1087,7 @@ function computeCropBounds(size, setup, tree, marks){
 /* ---------------------------------------------------------------
    Parser SGF (soporta ramas / variaciones)
 --------------------------------------------------------------- */
-function parseSGF(text){
+function parseSGF(text, all){
   let i=0; const n=text.length;
   function skipWS(){ while(i<n && /\s/.test(text[i])) i++; }
   function parseNode(){
@@ -1122,7 +1135,10 @@ function parseSGF(text){
     return {sequence, children};
   }
   skipWS();
-  return parseGameTree();
+  if(!all) return parseGameTree();
+  const trees = [];
+  while(i<n){ const t = parseGameTree(); if(!t) break; trees.push(t); skipWS(); }
+  return trees;
 }
 function sgfXY(v){
   if(!v || v.length<2) return null;
@@ -1149,6 +1165,31 @@ function collectPaths(tree){
 function importSGF(text){
   const tree = parseSGF(text);
   if(!tree) throw new Error('SGF no válido');
+  return importTree(tree);
+}
+/**
+ * Un .sgf puede traer un problema, varios árboles seguidos, o un libro entero: una raíz sin piedras cuyas ramas
+ * son cada una un problema con su posición inicial (AB/AW). Devuelve la lista de problemas [{tree}].
+ */
+function sgfProblems(text){
+  const trees = parseSGF(text, true);
+  if(!trees.length) throw new Error('SGF no válido');
+  const hasPos = n=>!!(n && (n.AB || n.AW));
+  const out = [];
+  trees.forEach(t=>{
+    const root = t.sequence[0] || {};
+    const withSetup = t.children.filter(c=>hasPos(c.sequence[0]));
+    if(t.sequence.length===1 && !hasPos(root) && !root.B && !root.W && t.children.length>=2 && withSetup.length >= t.children.length*0.8){
+      withSetup.forEach(c=>{
+        const first = Object.assign({}, c.sequence[0]);
+        if(root.SZ && !first.SZ) first.SZ = root.SZ;
+        out.push({tree:{sequence:[first].concat(c.sequence.slice(1)), children:c.children}});
+      });
+    } else out.push({tree:t});
+  });
+  return out;
+}
+function importTree(tree){
   const root = tree.sequence[0] || {};
   const size = root.SZ ? parseInt(root.SZ[0],10) : 19;
   const setup = [];
@@ -4672,13 +4713,13 @@ function renderSettings(host){
   root.appendChild(backupRow);
 
   const importField = document.createElement('div'); importField.className='field';
-  importField.innerHTML = '<label>Importar desde .zip o .sgf</label>';
-  const importInput = document.createElement('input'); importInput.type='file'; importInput.accept='.zip,.sgf,application/zip';
+  importField.innerHTML = '<label>Importar desde .zip o .sgf (uno o varios; libros con muchos problemas incluidos)</label>';
+  const importInput = document.createElement('input'); importInput.type='file'; importInput.multiple = true; importInput.accept='.zip,.sgf,application/zip';
   importField.appendChild(importInput);
   root.appendChild(importField);
   const importBtnRow = document.createElement('div'); importBtnRow.className='btnrow';
   const importBtn = document.createElement('button'); importBtn.className='btn pine small'; importBtn.textContent='Importar archivo';
-  importBtn.addEventListener('click', ()=>importBulkFile(importInput.files && importInput.files[0]));
+  importBtn.addEventListener('click', ()=>importBulkFiles(importInput.files));
   importBtnRow.appendChild(importBtn);
   root.appendChild(importBtnRow);
 
@@ -4749,43 +4790,87 @@ async function importFromText(text){
   render();
 }
 
-async function importBulkFile(file){
-  if(!file) return;
+/** Hash corto y estable (53 bits): una misma fuente da siempre el mismo id, así reimportar no duplica ni pisa tarjetas. */
+function hash53(str){
+  let h1=0xdeadbeef, h2=0x41c6ce57;
+  for(let i=0;i<str.length;i++){ const ch=str.charCodeAt(i); h1=Math.imul(h1^ch,2654435761); h2=Math.imul(h2^ch,1597334677); }
+  h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);
+  h2=Math.imul(h2^(h2>>>16),2246822507)^Math.imul(h1^(h1>>>13),3266489909);
+  return (4294967296*(2097151&h2)+(h1>>>0)).toString(36);
+}
+function prettyBookName(fileName){
+  return fileName.replace(/\.(sgf|zip)$/i,'').replace(/[_\-]+/g,' ').replace(/\s+/g,' ').trim()
+    .replace(/\b\w/g, c=>c.toUpperCase());
+}
+function problemTitle(parsed, fallback){
+  const t = (parsed.name||'').trim();
+  const m = /^problem[a-z]*\s*#?\s*(\d+)$/i.exec(t);
+  if(m) return 'Problema '+m[1];
+  if(t && t.length<=60) return t;
+  return fallback;
+}
+async function importBulkFiles(files){
+  files = Array.from(files||[]).filter(Boolean);
+  if(!files.length) return;
   try{
-    let entries;
-    if(file.name.toLowerCase().endsWith('.zip')){
-      const buffer = await file.arrayBuffer();
-      entries = readZip(buffer).filter(e=>e.name.toLowerCase().endsWith('.sgf'));
-      if(entries.length===0) throw new Error('el .zip no contiene archivos .sgf');
-    } else {
-      entries = [{name:file.name, text: await file.text()}];
+    // 1) reunir fuentes: {name, text, folder}
+    const sources = [];
+    for(const file of files){
+      const base = prettyBookName(file.name);
+      if(file.name.toLowerCase().endsWith('.zip')){
+        const entries = readZip(await file.arrayBuffer()).filter(e=>e.name.toLowerCase().endsWith('.sgf'));
+        if(entries.length===0) throw new Error(`«${file.name}» no contiene archivos .sgf`);
+        entries.forEach(e=>{
+          const parts = e.name.split('/').filter(Boolean);
+          const sub = parts.slice(0,-1).join(' / ');
+          sources.push({name:parts[parts.length-1], text:e.text, folder: sub ? base+' / '+sub : base, key:file.name+'/'+e.name, single:false});
+        });
+      } else {
+        sources.push({name:file.name, text:await file.text(), folder:base, key:file.name, single:true});
+      }
     }
-    let created = 0, failed = 0;
-    for(const entry of entries){
+    // 2) convertir en tarjetas (por lotes, para no congelar la pantalla)
+    let created = 0, existing = 0, failed = 0;
+    let batch = [];
+    const flush = async ()=>{ if(batch.length){ await storeSetMany(batch); batch = []; } };
+    let processed = 0;
+    for(const src of sources){
       try{
-        const parsed = importSGF(entry.text);
-        const correctLines = parsed.paths.length ? [parsed.paths[0]] : [];
-        const wrongLines = parsed.paths.length>1 ? [parsed.paths[1]] : [];
-        const card = {
-          id: uid(),
-          boardSize: parsed.size,
-          setup: parsed.setup,
-          folder: '',
-          tree: linesToTree(correctLines, wrongLines),
-          marks: parsed.marks || [],
-          title: parsed.name || entry.name.replace(/\.sgf$/i,''),
-          note: parsed.comment || '',
-          createdAt: Date.now(),
-          srs: defaultSRS(),
-        };
-        await storeSet('card:'+card.id, card);
-        created++;
+        const probs = sgfProblems(src.text);
+        const isBook = probs.length>1;
+        for(let pi=0; pi<probs.length; pi++){
+          const parsed = importTree(probs[pi].tree);
+          const id = 'imp-'+hash53(src.key+'#'+pi);
+          if(memoryStore.has('card:'+id) || (storageMode==='local' && await storeGet('card:'+id))){ existing++; continue; }
+          const correctLines = parsed.paths.length ? [parsed.paths[0]] : [];
+          const wrongLines = parsed.paths.length>1 ? [parsed.paths[1]] : [];
+          const fallback = isBook ? 'Problema '+(pi+1) : src.name.replace(/\.sgf$/i,'');
+          batch.push(['card:'+id, {
+            id, boardSize: parsed.size, setup: parsed.setup,
+            folder: (isBook || !src.single) ? src.folder : '',
+            tree: linesToTree(correctLines, wrongLines),
+            marks: parsed.marks || [],
+            title: problemTitle(parsed, fallback),
+            note: isBook ? '' : (parsed.comment || ''),
+            flag:false, doubt:false, createdAt: Date.now(), srs: defaultSRS(),
+          }]);
+          created++;
+          if(batch.length>=300){
+            await flush(); setSettingsNote(`Importando… ${created} tarjetas`); render();
+            await new Promise(r=>setTimeout(r,0));
+          }
+        }
       }catch(e){ failed++; }
+      processed++;
     }
+    await flush();
     State.cards = await storeListCards();
     await updateDueBadge();
-    if(failed>0) showToast(`Se importaron ${created} tarjetas (${failed} archivo(s) no se pudieron leer).`, 'warn');
-    else setSettingsNote(`Se importaron ${created} tarjetas.`);
+    const parts = [`${created} tarjeta(s) nuevas`];
+    if(existing) parts.push(`${existing} ya existían (no se tocaron)`);
+    if(failed) parts.push(`${failed} archivo(s) no se pudieron leer`);
+    if(failed && !created) showToast('No se pudo importar: '+parts.join(', ')+'.', 'warn');
+    else setSettingsNote('Importación lista: '+parts.join(', ')+'.');
     render();
   }catch(e){
     showToast('No se pudo importar: '+e.message, 'warn');
