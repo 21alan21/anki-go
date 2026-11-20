@@ -299,10 +299,75 @@
    Almacenamiento
 --------------------------------------------------------------- */
 const LS_PREFIX = 'go-anki:';
-let storageMode = 'local'; // 'local' | 'session'
-const memoryStore = new Map();
+let storageMode = 'local'; // 'idb' (IndexedDB, cientos de MB) | 'local' (localStorage, ~5 MB) | 'session' (solo memoria)
+const memoryStore = new Map();   // en 'idb' y 'session' guarda todo (clave → JSON); en 'idb' es la caché de lo que hay en IndexedDB
+let idbDb = null;
+let storageQuotaBytes = 0;
 
+function idbOpen(){
+  return new Promise((res,rej)=>{
+    if(typeof indexedDB==='undefined'){ rej(new Error('sin IndexedDB')); return; }
+    const r = indexedDB.open('kifu', 1);
+    r.onupgradeneeded = ()=>{ r.result.createObjectStore('kv'); };
+    r.onsuccess = ()=>res(r.result);
+    r.onerror = ()=>rej(r.error);
+    r.onblocked = ()=>rej(new Error('IndexedDB bloqueada'));
+  });
+}
+function idbAll(){
+  return new Promise((res,rej)=>{
+    const out = new Map();
+    const c = idbDb.transaction('kv').objectStore('kv').openCursor();
+    c.onsuccess = e=>{ const cur = e.target.result; if(cur){ out.set(cur.key, cur.value); cur.continue(); } else res(out); };
+    c.onerror = ()=>rej(c.error);
+  });
+}
+function idbWrite(fn){
+  return new Promise((res,rej)=>{
+    const tx = idbDb.transaction('kv','readwrite');
+    fn(tx.objectStore('kv'));
+    tx.oncomplete = ()=>res();
+    tx.onerror = tx.onabort = ()=>rej(tx.error || new Error('transacción cancelada'));
+  });
+}
+async function refreshQuota(){
+  try{ const est = await navigator.storage.estimate(); if(est && est.quota) storageQuotaBytes = est.quota; }catch(e){}
+}
 async function detectStorage(){
+  // 1) IndexedDB: mucho más espacio que localStorage
+  try{
+    idbDb = await idbOpen();
+    const all = await idbAll();
+    all.forEach((v,k)=>{ if(!k.startsWith('__')) memoryStore.set(k, v); });
+    // migración única desde localStorage (versiones anteriores guardaban ahí)
+    if(!all.has('__migrated')){
+      const old = [];
+      try{
+        for(let i=0;i<localStorage.length;i++){
+          const k = localStorage.key(i);
+          if(k && k.startsWith(LS_PREFIX) && !k.startsWith(LS_PREFIX+'__')) old.push([k, localStorage.getItem(k)]);
+        }
+      }catch(e){}
+      if(old.length){
+        await idbWrite(st=>{ old.forEach(([k,v])=>{ if(v!=null) st.put(v, k.slice(LS_PREFIX.length)); }); });
+        const check = await idbAll();
+        if(old.every(([k,v])=>check.get(k.slice(LS_PREFIX.length))===v)){
+          old.forEach(([k,v])=>{ if(v!=null) memoryStore.set(k.slice(LS_PREFIX.length), v); });
+          try{ old.forEach(([k])=>localStorage.removeItem(k)); }catch(e){}   // solo se borra lo viejo si todo quedó verificado
+        } else throw new Error('la migración no se pudo verificar');
+      }
+      await idbWrite(st=>st.put('1','__migrated'));
+    }
+    storageMode = 'idb';
+    try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(e){}   // pide que el navegador no borre los datos
+    refreshQuota();
+    updateStorageBanner();
+    return;
+  }catch(e){
+    console.warn('IndexedDB no disponible, se intenta localStorage.', e);
+    idbDb = null; memoryStore.clear();
+  }
+  // 2) localStorage (~5 MB) o 3) memoria de sesión
   try{
     const probe = LS_PREFIX+'__probe__';
     localStorage.setItem(probe, '1');
@@ -326,7 +391,7 @@ function updateStorageBanner(){
 }
 
 async function storeGet(key){
-  if(storageMode==='session'){
+  if(storageMode!=='local'){
     return memoryStore.has(key) ? JSON.parse(memoryStore.get(key)) : null;
   }
   try{
@@ -341,6 +406,12 @@ async function storeSet(key,val){
   dataVersion++;
   const json = JSON.stringify(val);
   if(storageMode==='session'){ memoryStore.set(key,json); return true; }
+  if(storageMode==='idb'){
+    memoryStore.set(key,json);
+    try{ await idbWrite(st=>st.put(json, key)); }
+    catch(e){ degradeToSession(e); }
+    return true;
+  }
   try{
     localStorage.setItem(LS_PREFIX+key, json);
     memoryStore.set(key,json);
@@ -382,6 +453,7 @@ async function restoreBackup(text){
 async function storeDelete(key){
   dataVersion++;
   memoryStore.delete(key);
+  if(storageMode==='idb'){ try{ await idbWrite(st=>st.delete(key)); }catch(e){ degradeToSession(e); } }
   if(storageMode==='local'){
     try{ localStorage.removeItem(LS_PREFIX+key); }catch(e){}
   }
@@ -409,6 +481,11 @@ function normalizeCard(card){
 const LS_LIMIT_CHARS = 5*1024*1024;
 function storageUsage(){
   let chars = 0, items = 0;
+  if(storageMode==='idb'){
+    memoryStore.forEach((v,k)=>{ chars += k.length + String(v).length; items++; });
+    const limit = storageQuotaBytes || 512*1024*1024;
+    return {chars, bytes: chars, limitChars: limit, pct: chars/limit*100, items};
+  }
   if(storageMode==='session'){
     memoryStore.forEach((v,k)=>{ chars += k.length + String(v).length; items++; });
   } else {
@@ -427,7 +504,7 @@ function fmtBytes(n){
   return (n/1024/1024).toFixed(2)+' MB';
 }
 async function storeListCards(){
-  if(storageMode==='session'){
+  if(storageMode!=='local'){
     const cards=[];
     memoryStore.forEach((v,k)=>{ if(k.startsWith('card:')) cards.push(normalizeCard(JSON.parse(v))); });
     return cards;
@@ -1664,7 +1741,7 @@ function enterTreeNode(step, node){
     return 'wrong';
   }
   if(node.verdict==='correct' && node.children.length===0 && !step.failed){
-    finalizeReview(step, 'Correcto — línea completa.', 'ok');
+    finalizeReview(step, 'Correcto', 'ok');
     return 'correct';
   }
   return 'continue';
@@ -1681,8 +1758,8 @@ async function autoPlayOpponent(){
   while(step.status==='guessing' || step.status==='following-wrong'){
     const node = step.cursor;
     if(node.children.length===0){
-      if(step.status==='following-wrong') finalizeReview(step, 'Fin de la línea incorrecta conocida.', 'bad');
-      else finalizeReview(step, 'Línea completa.', 'ok');
+      if(step.status==='following-wrong') finalizeReview(step, 'Incorrecto', 'bad');
+      else finalizeReview(step, 'Correcto', 'ok');
       render();
       return;
     }
@@ -1863,7 +1940,7 @@ function renderCreate(root){
     nextBtn.textContent = 'Siguiente →'; nextBtn.disabled = idx<0 || idx>=sibs.length-1;
     nextBtn.addEventListener('click', ()=>goNeighborCard(1));
     navRow.appendChild(prevBtn); navRow.appendChild(nextBtn);
-    if(idx>=0){ const pos=document.createElement('span'); pos.className='hint'; pos.style.cssText='align-self:center; margin:0; white-space:nowrap;'; pos.textContent=`${idx+1}/${sibs.length}`; navRow.insertBefore(pos, nextBtn); }
+    if(idx>=0) navRow.insertBefore(positionJumper(idx, sibs.length, goCardIndex), nextBtn);
     root.appendChild(navRow);
   }
 
@@ -2399,7 +2476,6 @@ function renderReview(root){
 let msgHtml;
 
 if(step.msg) msgHtml = `<span class="msg ${step.msgType}">${step.msg}</span>`;
-else if(step.status==='exploring') msgHtml = 'Explorando libremente — estas jugadas no se califican.';
 else msgHtml = '';
 
 { // siempre se reserva el espacio del mensaje para que el tablero no se desplace al aparecer/desaparecer
@@ -2455,7 +2531,7 @@ else msgHtml = '';
     const exitBtn = document.createElement('button'); exitBtn.className='btn ghost small'; exitBtn.textContent='Salir de exploración';
     exitBtn.addEventListener('click', ()=>{ step.status='feedback'; render(); });
     const finishBtn = document.createElement('button'); finishBtn.className='btn pine small'; finishBtn.textContent='Terminar exploración';
-    finishBtn.addEventListener('click', ()=>{ finalizeReview(step, 'Exploración terminada.', ''); render(); });
+    finishBtn.addEventListener('click', ()=>{ finalizeReview(step, '', ''); render(); });
     exploreRow.appendChild(exitBtn); exploreRow.appendChild(finishBtn);
     root.appendChild(exploreRow);
   }
@@ -2463,9 +2539,6 @@ else msgHtml = '';
   // panel de feedback tras una jugada equivocada
   if(step.status==='following-wrong' || step.status==='feedback'){
     const box = document.createElement('div'); box.className='lines-box';
-    const label = document.createElement('div'); label.style.fontSize='12.5px'; label.style.color='var(--ink-soft)'; label.style.marginBottom='6px';
-    label.textContent = step.status==='following-wrong' ? 'Sigues una línea incorrecta conocida. Puedes continuar, o:' : '¿Qué quieres hacer?';
-    box.appendChild(label);
     const actions = document.createElement('div'); actions.className='btnrow'; actions.style.margin='0';
     const revealBtn = document.createElement('button'); revealBtn.className='btn ghost small'; revealBtn.textContent='Ver línea correcta';
     revealBtn.addEventListener('click', revealReviewAnswer);
@@ -2497,15 +2570,11 @@ else msgHtml = '';
     prev.addEventListener('click', ()=>go(State.reviewIdx-1));
     const next = document.createElement('button'); next.className='btn ghost small'; next.textContent='Siguiente ›'; next.disabled = State.reviewIdx>=State.reviewQueue.length-1;
     next.addEventListener('click', ()=>go(State.reviewIdx+1));
-    nav.appendChild(prev); nav.appendChild(next);
+    nav.appendChild(prev);
+    if(State.reviewQueue.length) nav.appendChild(positionJumper(State.reviewIdx, State.reviewQueue.length, go));
+    nav.appendChild(next);
     filtersBox.insertBefore(nav, filtersBox.firstChild);
-    const jf = document.createElement('div'); jf.className='field';
-    jf.innerHTML = '<label>Ir a</label>';
-    const js = document.createElement('select');
-    State.reviewQueue.forEach((c,i)=>{ const o=document.createElement('option'); o.value=i; o.textContent = (i+1)+'. '+(c.title||'(sin título)'); js.appendChild(o); });
-    js.value = State.reviewIdx;
-    js.addEventListener('change', ()=>go(parseInt(js.value,10)));
-    jf.appendChild(js);
+    const jf = searchPicker('Buscar problema', State.reviewQueue.map((c,i)=>({label:cardSortLabel(c), sub:'Carpeta: '+(c.folder||'Sin carpeta'), onPick:()=>go(i)})));
     filtersBox.insertBefore(jf, nav.nextSibling);
     root.appendChild(filtersBox);
   }
@@ -2651,16 +2720,11 @@ async function confirmReviewMove(){
       return;
     } else if(result==='wrong'){
       if(!wasFollowingWrong) step.mistakes += 1;
-      step.msg = wasFollowingWrong ? 'Sigues la línea incorrecta conocida.' : 'Ese es un error conocido en esta posición.';
-      step.msgType='bad';
-    } else {
-      step.msg = step.status==='following-wrong' ? 'Sigues la línea incorrecta conocida.' : '';
-      step.msgType = step.status==='following-wrong' ? 'bad' : '';
     }
   } else {
     step.mistakes += 1;
     step.status = 'feedback';
-    step.msg = wasFollowingWrong ? 'También te has desviado de esa línea conocida.' : 'Esa jugada no es correcta.';
+    step.msg = 'Incorrecto';      // la secuencia termina aquí: la jugada no está en el árbol
     step.msgType = 'bad';
   }
   render();
@@ -2680,9 +2744,7 @@ function revealReviewAnswer(){
   path.forEach(m=>{ node = node.children.find(c=>c.x===m.x && c.y===m.y) || node; });
   step.cursor = node;
   step.revealed = true;
-  const counts = countLeavesByVerdict(card.tree);
-  const extra = counts.correct>1 ? ` (hay ${counts.correct} variantes válidas)` : '';
-  finalizeReview(step, 'Línea correcta revelada.'+extra, 'bad');
+  finalizeReview(step, 'Incorrecto', 'bad');
   render();
 }
 async function commitReview(){
@@ -2707,8 +2769,62 @@ async function advanceReviewQueue(){
 function isDraftCard(card){
   return !treeHasVerdict(card.tree, 'correct');
 }
+const NAT_COLLATOR = new Intl.Collator('es', {numeric:true, sensitivity:'base'});   // reutilizado: mucho más rápido que localeCompare con opciones
 function naturalCompare(a, b){
-  return a.localeCompare(b, 'es', {numeric:true, sensitivity:'base'});
+  return NAT_COLLATOR.compare(a, b);
+}
+/** Minúsculas y sin acentos, para buscar. */
+function foldText(t){ return String(t||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }
+/** «12/340»: al tocarlo se convierte en un campo numérico para saltar directo a esa posición (1…total). */
+function positionJumper(index, total, onJump){
+  const b = document.createElement('button'); b.className='btn ghost small';
+  b.style.cssText = 'min-width:74px; font-variant-numeric:tabular-nums;';
+  b.textContent = `${index+1}/${total}`; b.title = 'Toca para escribir el número al que quieres ir';
+  b.addEventListener('click', ()=>{
+    const inp = document.createElement('input'); inp.type='number'; inp.min=1; inp.max=total; inp.value=index+1;
+    inp.inputMode='numeric'; inp.style.cssText='width:74px; padding:7px 6px; text-align:center; align-self:center;';
+    let done = false;
+    const finish = (commit)=>{
+      if(done) return; done = true;
+      const n = parseInt(inp.value,10);
+      if(commit && n>=1 && n<=total && n-1!==index) onJump(n-1);
+      else if(inp.parentNode) inp.replaceWith(b);
+    };
+    inp.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); finish(true); } else if(e.key==='Escape') finish(false); });
+    inp.addEventListener('blur', ()=>finish(true));
+    b.replaceWith(inp); inp.focus(); inp.select();
+  });
+  return b;
+}
+/** Buscador con resultados en orden alfabético (no en el orden de la secuencia). items: [{label, sub, onPick}] */
+function searchPicker(labelText, items){
+  const f = document.createElement('div'); f.className='field';
+  f.innerHTML = `<label>${labelText}</label>`;
+  const inp = document.createElement('input'); inp.type='search'; inp.placeholder='Escribe para buscar…';
+  inp.autocomplete='off'; f.appendChild(inp);
+  const box = document.createElement('div'); box.className='lines-box'; box.style.cssText='display:none; max-height:240px; overflow-y:auto; margin-top:6px;';
+  f.appendChild(box);
+  let sorted = null;   // se ordena la primera vez que se busca (con miles de tarjetas, no al abrir la pantalla)
+  const refresh = ()=>{
+    const q = foldText(inp.value).trim();
+    if(q && !sorted) sorted = items.slice().sort((a,b)=>naturalCompare(a.label, b.label));
+    box.innerHTML = '';
+    if(!q){ box.style.display='none'; return; }
+    const hits = sorted.filter(it=>foldText(it.label+' '+(it.sub||'')).includes(q));
+    box.style.display = 'block';
+    if(!hits.length){ box.innerHTML = '<div class="hint" style="margin:6px 0;">Sin resultados.</div>'; return; }
+    hits.slice(0,40).forEach(it=>{
+      const row = document.createElement('div'); row.className='line-item'; row.style.cssText='cursor:pointer; display:block;';
+      const a = document.createElement('div'); a.textContent = it.label;
+      const b = document.createElement('div'); b.className='hint'; b.style.cssText='margin:2px 0 0; font-size:12px;'; b.textContent = it.sub||'';
+      row.appendChild(a); row.appendChild(b);
+      row.addEventListener('click', it.onPick);
+      box.appendChild(row);
+    });
+    if(hits.length>40){ const m = document.createElement('div'); m.className='hint'; m.style.margin='6px 0'; m.textContent = `Mostrando 40 de ${hits.length}. Escribe más para acotar.`; box.appendChild(m); }
+  };
+  inp.addEventListener('input', refresh);
+  return f;
 }
 function cardSortLabel(card){
   return (card.title && card.title.trim()) || (card.note && card.note.trim()) || 'Sin título';
@@ -2851,16 +2967,33 @@ function renderList(root){
     return naturalCompare(a,b);
   });
 
-  groupKeys.forEach(key=>{
+  // con bases grandes solo se dibuja una parte; «Mostrar más» agrega otro bloque
+  const filterKey = [State.listFolder, State.listSearch, State.listSort, State.listDraftsOnly, State.listFlagOnly, State.listDoubtOnly].join('|');
+  if(State.listLimitKey!==filterKey){ State.listLimitKey = filterKey; State.listLimit = 60; }
+  let budget = State.listLimit || 60;
+  const total = filtered.length;
+  for(const key of groupKeys){
+    if(budget<=0) break;
     if(groupKeys.length>1 || key!==''){
       const gh = document.createElement('div');
       gh.style.cssText='font-size:12.5px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:0.04em; margin:16px 0 6px;';
-      gh.textContent = key || 'Sin carpeta';
+      gh.textContent = (key || 'Sin carpeta') + ` (${groups.get(key).length})`;
       root.appendChild(gh);
     }
     const cardsInGroup = [...groups.get(key)].sort((a,b)=>compareCards(a,b,State.listSort));
-    cardsInGroup.forEach(card=>renderCardItem(root, card));
-  });
+    for(const card of cardsInGroup){
+      if(budget<=0) break;
+      renderCardItem(root, card); budget--;
+    }
+  }
+  const shown = (State.listLimit||60) - Math.max(0, budget);
+  if(shown<total){
+    const more = document.createElement('div'); more.className='btnrow';
+    const mb = document.createElement('button'); mb.className='btn ghost';
+    mb.textContent = `Mostrar más (${total-shown} restantes)`;
+    mb.addEventListener('click', ()=>{ State.listLimit = (State.listLimit||60) + 60; render(); });
+    more.appendChild(mb); root.appendChild(more);
+  }
 }
 
 function renderCardItem(root, card){
@@ -2935,16 +3068,20 @@ async function folderSiblings(card){
   return all.filter(c=>(c.folder||'')===(card.origFolder||''))
     .sort((a,b)=>naturalCompare(cardSortLabel(a), cardSortLabel(b)) || a.id.localeCompare(b.id));
 }
-async function goNeighborCard(dir){
+async function goCardIndex(target){
   await flushCreateSave();
   const st = State.create;
-  if(editSignature(st)!==st.snapshot && !confirm('Hay cambios sin guardar. ¿Descartarlos?')) return;
   const list = await folderSiblings(st);
-  const i = list.findIndex(c=>c.id===st.id);
-  const next = list[i+dir];
-  if(!next) return;
+  const next = list[Math.max(0, Math.min(list.length-1, target))];
+  if(!next || next.id===st.id) return;
   editCard(next);
   render();
+}
+async function goNeighborCard(dir){
+  const list = await folderSiblings(State.create);
+  const i = list.findIndex(c=>c.id===State.create.id);
+  if(i<0) return;
+  await goCardIndex(i+dir);
 }
 
 
@@ -3536,7 +3673,7 @@ function jpTenuki(){
   const cur = js.path[js.path.length-1];
   const p = passChild(cur);
   js.pending = null;
-  if(!p){ js.mistakes++; js.panel = 'miss'; js.msg = 'Tenuki no está en tu biblioteca aquí.'; render(); return; }
+  if(!p){ js.mistakes++; js.panel = 'miss'; js.msg = 'Incorrecto'; render(); return; }
   js.path = js.path.concat([p]); js.panel = null; js.msg = ''; js.notes = [jpNote('Tenuki', p)];
   render(); jpMachine();
 }
@@ -3548,7 +3685,7 @@ function jpConfirm(){
   let match = cur.children.find(c=>c.x===x && c.y===y);
   if(!match){ match = jpSymmetricMatch(js, x, y); }
   if(!match){
-    js.mistakes++; js.panel = 'miss'; js.msg = 'Esa jugada no está en tu biblioteca.';
+    js.mistakes++; js.panel = 'miss'; js.msg = 'Incorrecto';
     render(); return;
   }
   js.path = js.path.concat([match]);
@@ -3603,7 +3740,7 @@ function renderBookPractice(root){
 
   const status = document.createElement('div'); status.className='status-line';
   let st;
-  if(!cur.children.length) st = 'Fin de la secuencia.';
+  if(!cur.children.length) st = js.mistakes ? 'Incorrecto' : 'Correcto';
   else if(js.busy || jpMachineTurn(js)) st = 'Responde el rival…';
   else st = `Juega ${turnColor==='B'?'Negro':'Blanco'}${js.side==='both'?'':' (tú)'}`;
   status.innerHTML = `<span>${st}${js.msg ? ' · <span class="msg bad">'+esc(js.msg)+'</span>' : ''}</span>`;
@@ -3645,8 +3782,6 @@ function renderBookPractice(root){
 
   if(js.panel==='miss'){
     const box = document.createElement('div'); box.className='lines-box';
-    const lab = document.createElement('div'); lab.style.cssText='font-size:12.5px; color:var(--ink-soft); margin-bottom:6px;';
-    lab.textContent = '¿Qué quieres hacer?'; box.appendChild(lab);
     const row = document.createElement('div'); row.className='btnrow'; row.style.margin='0';
     const show = document.createElement('button'); show.className='btn ghost small'; show.textContent='Ver opciones';
     show.addEventListener('click', ()=>{ js.showOptions = true; js.panel = null; js.msg=''; render(); });
@@ -3693,7 +3828,7 @@ async function storeListColl(kind){
   const prefix = COLL[kind].prefix;
   const out = [];
   const add = v=>{ try{ const g = JSON.parse(v); if(g && g.tree) out.push(g); }catch(e){} };
-  if(storageMode==='session'){ memoryStore.forEach((v,k)=>{ if(k.startsWith(prefix)) add(v); }); return out; }
+  if(storageMode!=='local'){ memoryStore.forEach((v,k)=>{ if(k.startsWith(prefix)) add(v); }); return out; }
   try{
     for(let i=0;i<localStorage.length;i++){
       const k = localStorage.key(i);
@@ -4366,27 +4501,47 @@ function renderSettings(host){
     const hasNoFolderCards = (State.cards||[]).some(c=>!c.folder);
     const options = allFolderNames.slice();
     if(hasNoFolderCards) options.push('');
-    const currentSet = State.prefs && State.prefs.studyFolders ? new Set(State.prefs.studyFolders) : null; // null = todas
-
+    const chosenNow = ()=> State.prefs && State.prefs.studyFolders ? new Set(State.prefs.studyFolders.filter(f=>options.includes(f))) : new Set(options);
+    const det = document.createElement('details'); det.open = !!State.studyOpen;
+    det.addEventListener('toggle', ()=>{ State.studyOpen = det.open; });
+    const sum = document.createElement('summary'); sum.style.cssText='cursor:pointer; padding:8px 0; font-size:13.5px;';
+    const refreshSummary = ()=>{ const n = chosenNow().size; sum.textContent = n===options.length ? `Todas (${options.length})` : `${n} de ${options.length} seleccionadas`; };
+    refreshSummary(); det.appendChild(sum);
+    const q = document.createElement('input'); q.type='search'; q.placeholder='Buscar carpeta…'; q.autocomplete='off';
+    det.appendChild(q);
+    const bar = document.createElement('div'); bar.className='btnrow'; bar.style.margin='8px 0';
+    const mkBar = (t, fn)=>{ const bt=document.createElement('button'); bt.className='btn ghost small'; bt.textContent=t; bt.addEventListener('click', fn); bar.appendChild(bt); };
+    const list = document.createElement('div'); list.style.cssText='max-height:240px; overflow-y:auto; border:1px solid var(--line); border-radius:var(--radius); padding:4px 10px;';
+    const rows = [];
+    const apply = async (set)=>{
+      const allChecked = options.every(o=>set.has(o));
+      State.prefs = Object.assign({}, State.prefs, {studyFolders: allChecked ? null : Array.from(set)});
+      await storeSet('prefs', State.prefs);
+      rows.forEach(r=>{ r.chk.checked = set.has(r.f); });
+      refreshSummary();
+      await buildReviewQueue();
+    };
+    const visible = ()=>rows.filter(r=>r.row.style.display!=='none');
+    mkBar('Marcar visibles', ()=>{ const set = chosenNow(); visible().forEach(r=>set.add(r.f)); apply(set); });
+    mkBar('Quitar visibles', ()=>{ const set = chosenNow(); visible().forEach(r=>set.delete(r.f)); apply(set); });
+    det.appendChild(bar);
     options.forEach(f=>{
       const row = document.createElement('label');
       row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:5px 0; font-size:13.5px;';
       const chk = document.createElement('input'); chk.type='checkbox';
-      chk.checked = currentSet ? currentSet.has(f) : true;
-      chk.addEventListener('change', async ()=>{
-        const present = new Set(currentSet ? currentSet : options);
-        if(chk.checked) present.add(f); else present.delete(f);
-        const allChecked = options.every(o=>present.has(o));
-        State.prefs = Object.assign({}, State.prefs, {studyFolders: allChecked ? null : Array.from(present)});
-        await storeSet('prefs', State.prefs);
-        await buildReviewQueue();
-        render();
-      });
+      chk.checked = chosenNow().has(f);
+      chk.addEventListener('change', ()=>{ const set = chosenNow(); if(chk.checked) set.add(f); else set.delete(f); apply(set); });
       row.appendChild(chk);
       const label = document.createElement('span'); label.textContent = f || 'Sin carpeta';
       row.appendChild(label);
-      studyField.appendChild(row);
+      list.appendChild(row); rows.push({f, row, chk});
     });
+    q.addEventListener('input', ()=>{
+      const t = foldText(q.value).trim();
+      rows.forEach(r=>{ r.row.style.display = (!t || foldText(r.f||'Sin carpeta').includes(t)) ? 'flex' : 'none'; });
+    });
+    det.appendChild(list);
+    studyField.appendChild(det);
     root.appendChild(studyField);
   }
 
@@ -4400,7 +4555,7 @@ function renderSettings(host){
     <div class="line-item"><span>Pendientes hoy</span><span>${dueTotal}</span></div>
     <div class="line-item" id="drafts-stat-row" style="${draftTotal>0?'cursor:pointer;':''}"><span>Borradores (sin línea correcta)</span><span>${draftTotal}${draftTotal>0?' ›':''}</span></div>
     <div class="line-item" style="display:block;"><div style="display:flex; justify-content:space-between;"><span>Almacenamiento usado</span><span id="storage-label"></span></div><div style="height:8px; background:var(--paper-deep); border:1px solid var(--line); border-radius:4px; margin-top:6px; overflow:hidden;"><div id="storage-bar" style="height:100%; width:0; background:var(--pine);"></div></div></div>
-    <div class="line-item"><span>Guardado</span><span>${storageMode==='local' ? 'localStorage (permanente en este navegador)' : 'solo esta sesión'}</span></div>`;
+    <div class="line-item"><span>Guardado</span><span>${storageMode==='idb' ? 'IndexedDB (permanente en este navegador, cientos de MB)' : (storageMode==='local' ? 'localStorage (permanente, solo ~5 MB)' : 'solo esta sesión')}</span></div>`;
   root.appendChild(statsBox);
   {
     const u = storageUsage();
