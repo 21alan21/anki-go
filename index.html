@@ -471,6 +471,12 @@ async function storeDelete(key){
     try{ localStorage.removeItem(LS_PREFIX+key); }catch(e){}
   }
 }
+async function storeDeleteMany(keys){
+  dataVersion++;
+  keys.forEach(k=>memoryStore.delete(k));
+  if(storageMode==='idb'){ try{ await idbWrite(st=>{ keys.forEach(k=>st.delete(k)); }); }catch(e){ degradeToSession(e); } }
+  else if(storageMode==='local'){ keys.forEach(k=>{ try{ localStorage.removeItem(LS_PREFIX+k); }catch(e){} }); }
+}
 function normalizeCard(card){
   if(!card.tree){
     if(card.correctLines || card.wrongLines || card.correctLine){
@@ -815,6 +821,16 @@ function setVerdictDown(node, verdict){
     else n.verdict = verdict;
     n.children.forEach(walk);
   })(node);
+}
+/** El veredicto abarca toda la línea: las jugadas anteriores del camino, hacia atrás, hasta el punto donde la línea se
+ *  bifurca (esa jugada con varias ramas no se toca) o la raíz. Sobrescribe lo que hubiera. null quita el que tenía `prev`. */
+function markLineBack(path, verdict, prev){
+  for(let i=path.length-2; i>=1; i--){
+    const n = path[i];
+    if(n.children.length>1) break;
+    if(verdict===null){ if(n.verdict===prev) n.verdict = null; }
+    else n.verdict = verdict;
+  }
 }
 function treeHasVerdict(node, verdict){
   if(node.verdict===verdict) return true;
@@ -1201,7 +1217,9 @@ function importTree(tree){
   let comment = (root.C && root.C[0]) || '';
   if(!name && comment){ name = comment; comment = ''; } // SGF antiguos: el comentario hacía de título
   const players = [(root.PB&&root.PB[0])||'', (root.PW&&root.PW[0])||''];
-  return {size: [9,13,19].includes(size)?size:19, setup, marks, paths, name, comment, players, result:(root.RE&&root.RE[0])||''};
+  const pl = root.PL && root.PL[0] && root.PL[0].trim().toUpperCase();
+  const toPlay = (pl==='B'||pl==='W') ? pl : null;
+  return {size: [9,13,19].includes(size)?size:19, setup, marks, paths, name, comment, players, toPlay, result:(root.RE&&root.RE[0])||''};
 }
 function exportSGF(card){
   const size = card.boardSize;
@@ -1504,6 +1522,7 @@ const State = {
   reviewQueueTotal: 0,
   freeMode: false,
   listFolder: 'all',
+  viewFolder: null,
   listSort: 'alpha',
   listDraftsOnly: false,
   listFlagOnly: false,
@@ -1635,10 +1654,16 @@ async function switchView(v){
   updateDueBadge();
 }
 
+/** ¿La tarjeta cuenta para el estudio? Tiene línea correcta (no es borrador) y su carpeta está entre las elegidas. */
+function isActiveCard(c){
+  if(isDraftCard(c)) return false;
+  const sf = State.prefs && State.prefs.studyFolders;
+  return !sf || sf.includes(c.folder||'');
+}
 async function updateDueBadge(){
   const cards = (State.view==='review'||State.view==='free') ? State.cards : await storeListCards();
   const t = todayISO();
-  const due = cards.filter(c=>treeHasVerdict(c.tree,'correct') && c.srs.due<=t).length;
+  const due = cards.filter(c=>isActiveCard(c) && c.srs.due<=t).length;
   const badge = document.getElementById('due-badge');
   if(due>0){ badge.style.display='inline-block'; badge.textContent = due; }
   else badge.style.display='none';
@@ -1654,13 +1679,19 @@ async function logReviewedToday(id){
   State.prefs = Object.assign({}, State.prefs, {reviewLog:{date:todayISO(), ids}});
   await storeSet('prefs', State.prefs);
 }
+/** Carpeta activa en Repasar/Libre, solo para esta sesión: filtra dentro de las carpetas habilitadas en Ajustes. */
+function inStudyScope(c){
+  const f = c.folder||'';
+  const sf = State.prefs && State.prefs.studyFolders;
+  if(sf && !sf.includes(f)) return false;
+  const vf = State.viewFolder;
+  return vf==null || vf===f;
+}
 async function buildReviewQueue(){
   State.cards = await storeListCards();
   if(State.freeMode){
     // resolución libre: todas las tarjetas con solución, en orden aleatorio; no usa ni cambia el calendario
-    const sf = State.prefs && State.prefs.studyFolders;
-    let all = State.cards.filter(c=>treeHasVerdict(c.tree,'correct'));
-    if(sf) all = all.filter(c=>sf.includes(c.folder||''));
+    let all = State.cards.filter(c=>treeHasVerdict(c.tree,'correct') && inStudyScope(c));
     if(State.prefs && State.prefs.freeOrder==='random'){
       for(let i=all.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [all[i],all[j]]=[all[j],all[i]]; }
     } else {
@@ -1673,9 +1704,7 @@ async function buildReviewQueue(){
     return;
   }
   const t = todayISO();
-  const studyFolders = State.prefs && State.prefs.studyFolders;
-  let due = State.cards.filter(c=>treeHasVerdict(c.tree,'correct') && c.srs.due<=t);
-  if(studyFolders) due = due.filter(c=>studyFolders.includes(c.folder||''));
+  let due = State.cards.filter(c=>treeHasVerdict(c.tree,'correct') && c.srs.due<=t && inStudyScope(c));
   due.sort((a,b)=>a.srs.due.localeCompare(b.srs.due));
   const done = reviewedTodayIds();
   const repeats = due.filter(c=>done.includes(c.id));   // falladas hoy: vuelven sin gastar límite
@@ -1956,7 +1985,13 @@ function renderCreate(root){
           ? `background:${activeColor}; border-color:${activeColor}; color:#fff;`
           : `background:transparent; border-color:${activeColor}; color:${activeColor};`;
         b.textContent=label;
-        b.addEventListener('click', ()=>{ setVerdictDown(cursor, cursor.verdict===key ? null : key); render(); });
+        b.addEventListener('click', ()=>{
+          const unmark = cursor.verdict===key;
+          const prev = cursor.verdict;
+          setVerdictDown(cursor, unmark ? null : key);
+          markLineBack(st.path, unmark ? null : key, prev);
+          render();
+        });
         return b;
       };
       verdictRow.appendChild(mkVerdictBtn('correct','✓ Correcta','var(--pine)'));
@@ -2196,6 +2231,7 @@ async function autosaveCreate(st){
     doubt: !!st.doubt,
     createdAt: (existing && existing.createdAt) || Date.now(),
     srs: (existing && existing.srs) || defaultSRS(),
+    toPlay: st.tree.children[0] ? st.tree.children[0].color : st.firstMover,
   };
   await storeSet('card:'+card.id, card);
   st.lastSaved = editSignature(st); st.snapshot = st.lastSaved;
@@ -2419,6 +2455,7 @@ function renderImportPicker(root, st){
     st.tree = linesToTree(chosen, wrongChosen);
     st.path = [st.tree];
     if(st.tree.children[0]){ st.firstMover = st.tree.children[0].color; }
+    else if(parsed.toPlay){ st.firstMover = parsed.toPlay; }
     st.title = parsed.name || st.title;
     st.note = parsed.comment || st.note;
     st.mode = 'setup';
@@ -2457,23 +2494,23 @@ function renderReview(root){
     });
     of.appendChild(os); filtersBox.appendChild(of);
   }
-  const folderNames = Array.from(new Set((State.cards||[]).map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
-  const hasNoFolderCards = (State.cards||[]).some(c=>!c.folder);
-  if(folderNames.length){
+  // solo las carpetas habilitadas en Ajustes (y que tengan tarjetas con solución)
+  const enabledCards = (State.cards||[]).filter(c=>treeHasVerdict(c.tree,'correct') && (()=>{ const sf=State.prefs&&State.prefs.studyFolders; return !sf || sf.includes(c.folder||''); })());
+  const folderNames = Array.from(new Set(enabledCards.map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
+  const hasNoFolderCards = enabledCards.some(c=>!c.folder);
+  if(State.viewFolder!=null && !(State.viewFolder==='' ? hasNoFolderCards : folderNames.includes(State.viewFolder))) State.viewFolder = null;
+  if(folderNames.length + (hasNoFolderCards?1:0) > 1){
     const filterField = document.createElement('div'); filterField.className='field';
-    filterField.innerHTML = '<label>Repasar</label>';
+    filterField.innerHTML = '<label>Carpeta</label>';
     const sel = document.createElement('select');
-    const optAll = document.createElement('option'); optAll.value='__all__'; optAll.textContent='Todas las carpetas';
+    const optAll = document.createElement('option'); optAll.value='__all__'; optAll.textContent='Todas las habilitadas';
     sel.appendChild(optAll);
     folderNames.forEach(f=>{ const o=document.createElement('option'); o.value=f; o.textContent=f; sel.appendChild(o); });
     if(hasNoFolderCards){ const o=document.createElement('option'); o.value='__none__'; o.textContent='Sin carpeta'; sel.appendChild(o); }
-    const current = State.prefs && State.prefs.studyFolders;
-    sel.value = (current && current.length===1) ? (current[0]===''?'__none__':current[0]) : '__all__';
+    sel.value = State.viewFolder==null ? '__all__' : (State.viewFolder==='' ? '__none__' : State.viewFolder);
     sel.addEventListener('change', async ()=>{
       const v = sel.value;
-      const studyFolders = v==='__all__' ? null : [v==='__none__' ? '' : v];
-      State.prefs = Object.assign({}, State.prefs, {studyFolders});
-      await storeSet('prefs', State.prefs);
+      State.viewFolder = v==='__all__' ? null : (v==='__none__' ? '' : v);
       await buildReviewQueue();
       render();
     });
@@ -2954,6 +2991,31 @@ function renderList(root){
 
   root.appendChild(filterRow);
 
+  if(State.listFolder!=='all' && State.listFolder!=='__none__' && folderNames.includes(State.listFolder)){
+    const inFolder = State.cards.filter(c=>c.folder===State.listFolder);
+    const row = document.createElement('div'); row.className='btnrow';
+    const delF = document.createElement('button'); delF.className='btn ghost small';
+    const idleText = `Eliminar carpeta «${State.listFolder}» (${inFolder.length} tarjetas)`;
+    delF.textContent = idleText;
+    let armed = false, timer = null;
+    delF.addEventListener('click', async ()=>{
+      if(!armed){
+        armed = true; delF.classList.add('on');
+        delF.textContent = `¿Seguro? Toca otra vez para borrar ${inFolder.length} tarjetas`;
+        timer = setTimeout(()=>{ armed=false; delF.classList.remove('on'); delF.textContent = idleText; }, 5000);
+        return;
+      }
+      clearTimeout(timer);
+      await storeDeleteMany(inFolder.map(c=>'card:'+c.id));
+      State.listFolder = 'all';
+      State.cards = await storeListCards();
+      await updateDueBadge();
+      render();
+    });
+    row.appendChild(delF);
+    root.appendChild(row);
+  }
+
   {
     const draftToggleRow = document.createElement('div'); draftToggleRow.className='btnrow';
     const draftBtn = document.createElement('button');
@@ -3085,7 +3147,7 @@ function editCard(card){
   const treeCopy = cloneTree(card.tree);
   State.create = {
     id: card.id, boardSize: card.boardSize, setup: JSON.parse(JSON.stringify(card.setup)),
-    firstMover: treeFirstColor(treeCopy),
+    firstMover: treeCopy.children[0] ? treeFirstColor(treeCopy) : (card.toPlay || treeFirstColor(treeCopy)),
     folder: card.folder || '',
     tree: treeCopy,
     path: [treeCopy],
@@ -3292,7 +3354,7 @@ async function importJosekiEntries(entries){
       const n = mergeSGFIntoBook(e.text, rec);
       if(n===null){ skipped++; continue; }
       const head = (parseSGF(e.text).sequence[0]) || {};
-      rec.title = (head.GN && head.GN[0]) || e.name.replace(/^.*\//,'').replace(/\.sgf$/i,'');
+      rec.title = e.name.replace(/^.*\//,'').replace(/\.sgf$/i,'').trim() || (head.GN && head.GN[0]) || 'Joseki';
       await storeSet('joseki:'+rec.id, rec); ok++;
     }catch(err){ bad++; }
   }
@@ -3615,8 +3677,12 @@ function mergeForPractice(t, src, rec){
   });
 }
 /** Árbol de práctica según la selección: todo, una carpeta o un archivo. Con varios archivos se combinan en un solo árbol. */
+/** Un joseki cuenta para practicar si tiene jugadas y no está desactivado. */
+function josekiFolderOn(r){ const f = State.prefs && State.prefs.josekiFolders; return !f || f.includes(r.folder||''); }
+function gameFolderOn(g){ const f = State.prefs && State.prefs.gameFolders; return !f || f.includes(g.folder||''); }
+function josekiActive(r){ return r.tree.children.length>0 && josekiFolderOn(r); }
 function jpBuildSource(){
-  const recs = (State.lists.joseki||[]).filter(r=>r.tree.children.length);
+  const recs = (State.lists.joseki||[]).filter(josekiActive);
   const sel = State.jpSel || 'all';
   let chosen = recs;
   if(sel.startsWith('folder:')) chosen = recs.filter(r=>(r.folder||'')===sel.slice(7));
@@ -3736,7 +3802,7 @@ function jpConfirm(){
 }
 function renderBookPractice(root){
   appendToast(root);
-  const recs = (State.lists.joseki||[]).filter(r=>r.tree.children.length);
+  const recs = (State.lists.joseki||[]).filter(josekiActive);
   if(recs.length>1){
     const f = document.createElement('div'); f.className='field';
     f.innerHTML = '<label>Practicar</label>';
@@ -3759,7 +3825,8 @@ function renderBookPractice(root){
   const src = State.jpSrc;
   if(!src.tree.children.length){
     const empty = document.createElement('div'); empty.className='empty';
-    empty.innerHTML = '<div class="big">Tu biblioteca está vacía</div><div>Agrega josekis en Biblioteca.</div>';
+    const off = (State.lists.joseki||[]).filter(r=>r.tree.children.length && !josekiFolderOn(r)).length;
+    empty.innerHTML = off ? `<div class="big">No hay josekis activos</div><div>${off} en carpetas desactivadas: actívalas en Ajustes → Repaso.</div>` : '<div class="big">Tu biblioteca está vacía</div><div>Agrega josekis en Biblioteca.</div>';
     root.appendChild(empty); return;
   }
   const js = jpState(), book = js.view;
@@ -4116,7 +4183,9 @@ function pickSgfFiles(kind){
 
 function renderCollection(root, kind){
   if(State.game && State.game.kind===kind){ renderItemEditor(root); return; }
-  const C = COLL[kind], items = State.lists[kind];
+  const C = COLL[kind], allItems = State.lists[kind];
+  const items = kind==='game' ? allItems.filter(gameFolderOn) : allItems;
+  const hiddenGames = allItems.length - items.length;
   const h = document.createElement('h2'); h.className='section-title'; h.textContent = C.title;
   root.appendChild(h);
   appendToast(root);
@@ -4147,6 +4216,21 @@ function renderCollection(root, kind){
     fs.addEventListener('change', ()=>{ State.collFolder = fs.value; render(); });
     ff.appendChild(fs); srt.insertBefore(ff, srt.firstChild);
   }
+  if(State.collFolder && State.collFolder!=='all' && State.collFolder!=='__none__' && folderNames.includes(State.collFolder)){
+    const inF = items.filter(g=>g.folder===State.collFolder);
+    const dr = document.createElement('div'); dr.className='btnrow';
+    const df = document.createElement('button'); df.className='btn ghost small';
+    const idle = `Eliminar carpeta «${State.collFolder}» (${inF.length} ${kind==='game'?'partidas':'archivos'})`;
+    df.textContent = idle; let armed=false, tm=null;
+    df.addEventListener('click', async ()=>{
+      if(!armed){ armed=true; df.classList.add('on'); df.textContent=`¿Seguro? Toca otra vez para borrar ${inF.length} ${kind==='game'?'partidas':'archivos'}`; tm=setTimeout(()=>{ armed=false; df.classList.remove('on'); df.textContent=idle; },5000); return; }
+      clearTimeout(tm);
+      await storeDeleteMany(inF.map(g=>C.prefix+g.id));
+      State.collFolder = 'all'; State.jpSrc = null; State.jp = null;
+      State.lists[kind] = await storeListColl(kind); render();
+    });
+    dr.appendChild(df); root.appendChild(dr);
+  }
   const flagCount = items.filter(g=>g.flag).length;
   const flagRow = document.createElement('div'); flagRow.className='btnrow';
   const flagFilter = document.createElement('button'); flagFilter.className = 'btn' + (State.collFlagOnly ? ' on' : ' ghost');
@@ -4162,11 +4246,16 @@ function renderCollection(root, kind){
     'oldest': (a,b)=>(a.createdAt||0)-(b.createdAt||0),
   }[State.collSort || 'alpha'];
   const cf = State.collFolder || 'all';
+  if(hiddenGames>0){
+    const hn = document.createElement('p'); hn.className='hint';
+    hn.textContent = `${hiddenGames} partida(s) en carpetas desactivadas (Ajustes → Repaso).`;
+    root.appendChild(hn);
+  }
   const list = items.filter(g=>(!q || hay(g).includes(q)) && (!State.collFlagOnly || g.flag)
     && (cf==='all' || (cf==='__none__' ? !g.folder : g.folder===cf))).sort(cmp);
   if(!list.length){
     const empty = document.createElement('div'); empty.className='empty';
-    empty.innerHTML = items.length ? '<div class="big">Nada que mostrar</div>' : `<div class="big">Aún no hay ${kind==='game'?'partidas':'josekis'}</div>`;
+    empty.innerHTML = allItems.length ? '<div class="big">Nada que mostrar</div>' : `<div class="big">Aún no hay ${kind==='game'?'partidas':'josekis'}</div>`;
     root.appendChild(empty); appendImportRow(root, kind); return;
   }
   const renderOne = g=>{
@@ -4186,11 +4275,13 @@ function renderCollection(root, kind){
       renderBoard(mini, g.boardSize, shown, null, mk, null, null, crop, false);
     } else renderBoard(mini, g.boardSize, stones, null, null);
     item.appendChild(mini);
+    if(kind==='joseki' && !josekiFolderOn(g)) item.style.opacity = '0.55';
     item.appendChild(starBtn(!!g.flag, async ()=>{ g.flag = !g.flag; await storeSet(C.prefix+g.id, g); render(); }));
     const info = document.createElement('div'); info.className='info';
-    info.innerHTML = `<div class="note">${esc(g.title)||'(sin título)'}</div><div class="meta">${gameMetaLine(g)}</div>`;
+    info.innerHTML = `<div class="note">${esc(g.title)||'(sin título)'}${kind==='joseki'&&!josekiFolderOn(g)?' <span style="font-size:11px;color:var(--ink-soft);">· carpeta desactivada en Ajustes</span>':''}</div><div class="meta">${gameMetaLine(g)}</div>`;
     item.appendChild(info);
     const actions = document.createElement('div'); actions.className='actions';
+
     const openBtn = document.createElement('button'); openBtn.className='btn pine small'; openBtn.textContent='Abrir';
     openBtn.addEventListener('click', ()=>{ if(kind==='joseki') openJosekiFile(g); else openItem(g, kind); });
     const sgfBtn = document.createElement('button'); sgfBtn.className='btn ghost small'; sgfBtn.textContent='.sgf';
@@ -4535,16 +4626,17 @@ function renderSettings(host){
   root.appendChild(mkPref('jsSym','Posiciones espejo y rotadas'));
   root.appendChild(mkPref('jsInv','Colores invertidos'));
 
-  const allFolderNames = Array.from(new Set((State.cards||[]).map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
+  const folderChecklist = (title, items, prefKey, openKey, afterApply)=>{
+  const allFolderNames = Array.from(new Set((items||[]).map(c=>c.folder).filter(Boolean))).sort(naturalCompare);
   if(allFolderNames.length){
     const studyField = document.createElement('div'); studyField.className='field';
-    studyField.innerHTML = '<label>Carpetas a estudiar</label>';
-    const hasNoFolderCards = (State.cards||[]).some(c=>!c.folder);
+    studyField.innerHTML = `<label>${title}</label>`;
+    const hasNoFolderCards = (items||[]).some(c=>!c.folder);
     const options = allFolderNames.slice();
     if(hasNoFolderCards) options.push('');
-    const chosenNow = ()=> State.prefs && State.prefs.studyFolders ? new Set(State.prefs.studyFolders.filter(f=>options.includes(f))) : new Set(options);
-    const det = document.createElement('details'); det.open = !!State.studyOpen;
-    det.addEventListener('toggle', ()=>{ State.studyOpen = det.open; });
+    const chosenNow = ()=> State.prefs && State.prefs[prefKey] ? new Set(State.prefs[prefKey].filter(f=>options.includes(f))) : new Set(options);
+    const det = document.createElement('details'); det.open = !!State[openKey];
+    det.addEventListener('toggle', ()=>{ State[openKey] = det.open; });
     const sum = document.createElement('summary'); sum.style.cssText='cursor:pointer; padding:8px 0; font-size:13.5px;';
     const refreshSummary = ()=>{ const n = chosenNow().size; sum.textContent = n===options.length ? `Todas (${options.length})` : `${n} de ${options.length} seleccionadas`; };
     refreshSummary(); det.appendChild(sum);
@@ -4556,11 +4648,11 @@ function renderSettings(host){
     const rows = [];
     const apply = async (set)=>{
       const allChecked = options.every(o=>set.has(o));
-      State.prefs = Object.assign({}, State.prefs, {studyFolders: allChecked ? null : Array.from(set)});
+      State.prefs = Object.assign({}, State.prefs, {[prefKey]: allChecked ? null : Array.from(set)});
       await storeSet('prefs', State.prefs);
       rows.forEach(r=>{ r.chk.checked = set.has(r.f); });
       refreshSummary();
-      await buildReviewQueue();
+      await afterApply();
     };
     const visible = ()=>rows.filter(r=>r.row.style.display!=='none');
     mkBar('Marcar visibles', ()=>{ const set = chosenNow(); visible().forEach(r=>set.add(r.f)); apply(set); });
@@ -4585,15 +4677,23 @@ function renderSettings(host){
     studyField.appendChild(det);
     root.appendChild(studyField);
   }
+  };
+  folderChecklist('Carpetas de tsumegos a estudiar', State.cards, 'studyFolders', 'studyOpen', ()=>buildReviewQueue());
+  folderChecklist('Carpetas de partidas a mostrar', State.lists.game, 'gameFolders', 'gameOpen', async ()=>{});
+  folderChecklist('Carpetas de josekis a practicar', State.lists.joseki, 'josekiFolders', 'josekiOpen', async ()=>{ State.jpSrc = null; State.jp = null; });
 
   const t = todayISO();
   const cards = State.cards||[];
   root = S.datos;
-  const dueTotal = cards.filter(c=>treeHasVerdict(c.tree,'correct') && c.srs.due<=t).length;
+  const dueTotal = cards.filter(c=>isActiveCard(c) && c.srs.due<=t).length;
+  const activeTotal = cards.filter(isActiveCard).length;
   const draftTotal = cards.filter(isDraftCard).length;
   const statsBox = document.createElement('div'); statsBox.className='lines-box';
-  statsBox.innerHTML = `<div class="line-item"><span>Tarjetas totales</span><span>${cards.length}</span></div>
+  statsBox.innerHTML = `<div class="line-item"><span>Tarjetas activas (con solución y en carpetas a estudiar)</span><span>${activeTotal}</span></div>
+    <div class="line-item"><span>Tarjetas en total</span><span>${cards.length}</span></div>
     <div class="line-item"><span>Pendientes hoy</span><span>${dueTotal}</span></div>
+    <div class="line-item"><span>Partidas visibles / total</span><span>${(State.lists.game||[]).filter(gameFolderOn).length} / ${(State.lists.game||[]).length}</span></div>
+    <div class="line-item"><span>Josekis activos / total</span><span>${(State.lists.joseki||[]).filter(josekiActive).length} / ${(State.lists.joseki||[]).length}</span></div>
     <div class="line-item" id="drafts-stat-row" style="${draftTotal>0?'cursor:pointer;':''}"><span>Borradores (sin línea correcta)</span><span>${draftTotal}${draftTotal>0?' ›':''}</span></div>
     <div class="line-item" style="display:block;"><div style="display:flex; justify-content:space-between;"><span>Almacenamiento usado</span><span id="storage-label"></span></div><div style="height:8px; background:var(--paper-deep); border:1px solid var(--line); border-radius:4px; margin-top:6px; overflow:hidden;"><div id="storage-bar" style="height:100%; width:0; background:var(--pine);"></div></div></div>
     <div class="line-item"><span>Guardado</span><span>${storageMode==='idb' ? 'IndexedDB (permanente en este navegador, cientos de MB)' : (storageMode==='local' ? 'localStorage (permanente, solo ~5 MB)' : 'solo esta sesión')}</span></div>`;
@@ -4804,7 +4904,7 @@ function prettyBookName(fileName){
 }
 function problemTitle(parsed, fallback){
   const t = (parsed.name||'').trim();
-  const m = /^problem[a-z]*\s*#?\s*(\d+)$/i.exec(t);
+  const m = /^problem[a-z]*\s*#?\s*(\d+(?:[-.]\d+)*)\s*(?:,.*)?$/i.exec(t);
   if(m) return 'Problema '+m[1];
   if(t && t.length<=60) return t;
   return fallback;
@@ -4853,6 +4953,7 @@ async function importBulkFiles(files){
             title: problemTitle(parsed, fallback),
             note: isBook ? '' : (parsed.comment || ''),
             flag:false, doubt:false, createdAt: Date.now(), srs: defaultSRS(),
+            toPlay: parsed.toPlay || (parsed.paths[0] && parsed.paths[0][0] ? parsed.paths[0][0].color : 'B'),
           }]);
           created++;
           if(batch.length>=300){
